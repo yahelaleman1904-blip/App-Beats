@@ -15,10 +15,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.get("/")
+@app.get("/api/health")
+async def health_check():
+    return {"ok": True, "status": "online", "service": "Draftea Beats AI Cloud"}
 
 VAULT_FILE = "beats_history_vault.json"
 MEXICO_TZ = timezone(timedelta(hours=-6))

@@ -5,12 +5,13 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import json
 import os
-import httpx
 import re
+import unicodedata
+import httpx
 
 app = FastAPI(
-    title="Draftea Beats AI - Motor Táctico Profundo & Historial L5",
-    version="5.0.0"
+    title="Draftea Beats AI - Motor Estadístico 100% Verificado",
+    version="6.0.0"
 )
 
 app.add_middleware(
@@ -20,10 +21,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-@app.get("/")
-@app.get("/api/health")
-async def health_check():
-    return {"ok": True, "status": "online", "service": "Draftea Beats AI Cloud"}
 
 VAULT_FILE = "beats_history_vault.json"
 MEXICO_TZ = timezone(timedelta(hours=-6))
@@ -33,7 +30,6 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Catálogo con perfil estadístico real de cada liga
 LIVE_LEAGUES_MAP = {
     "LIGA_MX": {"slug": "mex.1", "name": "Liga BBVA MX", "profile": "Equilibrada • Localía Fuerte y Liguilla Táctica"},
     "LIGA_MX_FEM": {"slug": "mex.w.1", "name": "Liga MX Femenil", "profile": "Alta en Goles (+2.5 frecuente) • Dominio Top 5"},
@@ -58,6 +54,14 @@ LIVE_LEAGUES_MAP = {
 
 DEEP_CACHE = {}
 CARTELERA_CACHE = {"timestamp": None, "date_key": None, "matches": []}
+
+
+def normalize_text(text: str) -> str:
+    """Elimina acentos y pasa a minúsculas para comparar nombres sin fallar (ej. Mbappé == Mbappe)."""
+    if not text:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", str(text))
+    return "".join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip()
 
 
 def parse_kickoff_utc(iso_date_str: str):
@@ -93,6 +97,116 @@ def safe_float(val, default=0.0):
         return default
 
 
+def extract_official_team_stats_from_boxscore(box_team_obj):
+    """
+    Lee con precisión quirúrgica las estadísticas oficiales de un equipo en ESPN.
+    Soporta tanto llaves directas (totalShots, shotsOnGoal, shotsOnTarget)
+    como el formato compuesto shotsSummary = "17 (8)" -> 17 tiros, 8 al arco.
+    """
+    stats_list = box_team_obj.get("statistics", [])
+    stat_map = {}
+    for st in stats_list:
+        name = st.get("name", "")
+        disp = str(st.get("displayValue", "")).strip()
+        val = st.get("value")
+        stat_map[name] = disp if disp != "" else str(val if val is not None else "0")
+
+    # 1. Tiros Totales y Tiros al Arco desde shotsSummary si existe (ej. "15 (4)" o "17 (8)")
+    summary_shots, summary_sot = None, None
+    if "shotsSummary" in stat_map:
+        nums = re.findall(r"\d+", stat_map["shotsSummary"])
+        if len(nums) >= 2:
+            summary_shots = int(nums[0])
+            summary_sot = int(nums[1])
+        elif len(nums) == 1:
+            summary_shots = int(nums[0])
+
+    # 2. Tiros Totales directos
+    direct_shots = None
+    for k in ["totalShots", "shots"]:
+        if k in stat_map:
+            nums = re.findall(r"\d+", stat_map[k])
+            if nums:
+                direct_shots = int(nums[0])
+                break
+
+    # 3. Tiros al Arco directos (En ESPN LaLiga/Premier se llama 'shotsOnGoal' o 'shotsOnTarget')
+    direct_sot = None
+    for k in ["shotsOnGoal", "shotsOnTarget", "onTargetScoringAttempts"]:
+        if k in stat_map:
+            nums = re.findall(r"\d+", stat_map[k])
+            if nums:
+                direct_sot = int(nums[0])
+                break
+
+    final_shots = direct_shots if direct_shots is not None else (summary_shots or 0)
+    final_sot = direct_sot if direct_sot is not None else (summary_sot or 0)
+
+    def get_single_int(keys, default_val=0):
+        for k in keys:
+            if k in stat_map:
+                nums = re.findall(r"\d+", stat_map[k])
+                if nums:
+                    return int(nums[0])
+        return default_val
+
+    corners = get_single_int(["wonCorners", "cornerKicks", "corners"], 0)
+    yellows = get_single_int(["yellowCards"], 0)
+    reds = get_single_int(["redCards"], 0)
+    saves = get_single_int(["saves"], 0)
+    poss = get_single_int(["possessionPct"], 50)
+
+    return {
+        "shots": final_shots,
+        "sot": final_sot,
+        "corners": corners,
+        "yellows": yellows,
+        "reds": reds,
+        "cards": yellows + reds,
+        "saves": saves,
+        "possession": poss
+    }
+
+
+def extract_player_stats_from_entry(p_entry):
+    """Extrae tiros, tiros al arco (shotsOnGoal / shotsOnTarget), goles, asistencias y atajadas reales de un jugador."""
+    st_map = {}
+    for s in p_entry.get("stats", []):
+        s_name = s.get("name", "")
+        s_val = s.get("value")
+        if s_val is not None:
+            st_map[s_name] = safe_float(s_val, 0.0)
+        else:
+            nums = re.findall(r"\d+", str(s.get("displayValue", "0")))
+            st_map[s_name] = float(nums[0]) if nums else 0.0
+
+    shots = int(
+        st_map.get(
+            "totalShots",
+            st_map.get("shots", st_map.get("scoringAttempts", 0))
+        )
+    )
+    sot = int(
+        st_map.get(
+            "shotsOnGoal",
+            st_map.get("shotsOnTarget", st_map.get("onTargetScoringAttempts", 0))
+        )
+    )
+    goals = int(st_map.get("totalGoals", st_map.get("goals", 0)))
+    assists = int(st_map.get("goalAssists", st_map.get("assists", 0)))
+    saves = int(st_map.get("saves", 0))
+    conceded = int(st_map.get("goalsConceded", 0))
+
+    return {
+        "shots": shots,
+        "sot": sot,
+        "goals": goals,
+        "assists": assists,
+        "saves": saves,
+        "conceded": conceded
+    }
+
+
 def build_pitch_rows_from_roster(roster_list):
     starters = [p for p in roster_list if p.get("starter")]
     if not starters:
@@ -106,13 +220,12 @@ def build_pitch_rows_from_roster(roster_list):
         jersey = safe_int(p.get("jersey", athlete.get("jersey", 0)), 10)
         short_name = athlete.get("shortName") or athlete.get("displayName", "Jugador")
 
-        stats_dict = {st.get("name"): safe_float(st.get("value", 0)) for st in p.get("stats", [])}
-
-        goals = int(stats_dict.get("totalGoals", 0))
-        assists = int(stats_dict.get("goalAssists", 0))
-        shots = int(stats_dict.get("totalShots", 0))
-        sot = int(stats_dict.get("shotsOnTarget", 0))
-        saves = int(stats_dict.get("saves", 0))
+        p_st = extract_player_stats_from_entry(p)
+        goals = p_st["goals"]
+        assists = p_st["assists"]
+        shots = p_st["shots"]
+        sot = p_st["sot"]
+        saves = p_st["saves"]
         subbed_out = p.get("subbedOut", False)
 
         base_rating = 6.7 + (goals * 1.1) + (assists * 0.7) + (sot * 0.25) + (saves * 0.2)
@@ -152,7 +265,7 @@ def build_pitch_rows_from_roster(roster_list):
 
 
 async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, event_id: str, target_team_id: str):
-    cache_key = f"summary_v6_{event_id}_{target_team_id}"
+    cache_key = f"summary_v7_{event_id}_{target_team_id}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
 
@@ -181,7 +294,6 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         home_score = safe_int(home_c.get("score", 0))
         away_score = safe_int(away_c.get("score", 0))
 
-        # Mapa de ID de equipo -> Siglas y Nombre para que NUNCA salga () vacío en goles ni tarjetas
         team_id_to_label = {
             home_id_str: f"{home_abbr} • {home_name}",
             away_id_str: f"{away_abbr} • {away_name}"
@@ -195,10 +307,19 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         date_mx, _ = convert_utc_to_mexico(header_comp.get("date", ""))
         short_score_label = f"{home_abbr} {home_score}-{away_score} {away_abbr}"
 
-        # Extraer Rosters primero para mapear qué jugador pertenece a qué equipo
+        # Emparejar rosters por team.id exacto
         rosters = data.get("rosters", [])
-        home_roster_obj = rosters[0] if len(rosters) > 0 else {}
-        away_roster_obj = rosters[1] if len(rosters) > 1 else {}
+        home_roster_obj, away_roster_obj = {}, {}
+        for r_obj in rosters:
+            r_tid = str(r_obj.get("team", {}).get("id", ""))
+            if r_tid == home_id_str:
+                home_roster_obj = r_obj
+            elif r_tid == away_id_str:
+                away_roster_obj = r_obj
+        if not home_roster_obj and len(rosters) > 0:
+            home_roster_obj = rosters[0]
+        if not away_roster_obj and len(rosters) > 1:
+            away_roster_obj = rosters[1]
 
         player_to_team_label = {}
         for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
@@ -210,28 +331,88 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
                 if ath.get("shortName"):
                     player_to_team_label[ath.get("shortName")] = t_label
 
+        # Emparejar boxscore.teams por team.id exacto
         box_teams = data.get("boxscore", {}).get("teams", [])
-        def get_stat_pair(stat_keys):
-            vals = [0, 0]
-            for idx, bt in enumerate(box_teams[:2]):
-                for st in bt.get("statistics", []):
-                    if st.get("name") in stat_keys:
-                        vals[idx] = safe_int(st.get("displayValue", 0))
-                        break
-            return vals
+        home_box_obj, away_box_obj = {}, {}
+        for bt in box_teams:
+            bt_id = str(bt.get("team", {}).get("id", ""))
+            if bt_id == home_id_str:
+                home_box_obj = bt
+            elif bt_id == away_id_str:
+                away_box_obj = bt
+        if not home_box_obj and len(box_teams) > 0:
+            home_box_obj = box_teams[0]
+        if not away_box_obj and len(box_teams) > 1:
+            away_box_obj = box_teams[1]
 
-        shots_pair = get_stat_pair(["totalShots", "shotsSummary"])
-        sot_pair = get_stat_pair(["shotsOnTarget", "onTargetScoringAttempts"])
-        corners_pair = get_stat_pair(["wonCorners", "cornerKicks"])
-        yellows_pair = get_stat_pair(["yellowCards"])
-        reds_pair = get_stat_pair(["redCards"])
-        total_cards_pair = [yellows_pair[0] + reds_pair[0], yellows_pair[1] + reds_pair[1]]
-        saves_pair = get_stat_pair(["saves"])
-        poss_pair = get_stat_pair(["possessionPct"])
-        if poss_pair == [0, 0]:
-            poss_pair = [50, 50]
+        h_official = extract_official_team_stats_from_boxscore(home_box_obj)
+        a_official = extract_official_team_stats_from_boxscore(away_box_obj)
 
-        # PUNTO 4: Identificar siempre de qué equipo fue cada gol y cada tarjeta
+        player_perf, gk_perf = [], []
+        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
+            t_abbr = home_abbr if r_idx == 0 else away_abbr
+            t_id = home_id_str if r_idx == 0 else away_id_str
+            for p in r_obj.get("roster", []):
+                ath = p.get("athlete", {})
+                p_name = ath.get("displayName", "Jugador")
+                pos = p.get("position", {}).get("abbreviation", "M")
+                is_starter = bool(p.get("starter", False))
+                subbed_in = bool(p.get("subbedIn", False))
+
+                p_st = extract_player_stats_from_entry(p)
+                sh = p_st["shots"]
+                sot = p_st["sot"]
+                gls = p_st["goals"]
+                ast = p_st["assists"]
+                svs = p_st["saves"]
+                ga = p_st["conceded"]
+
+                if pos == "G" and (is_starter or svs > 0 or subbed_in):
+                    gk_perf.append({
+                        "teamId": t_id,
+                        "team": t_abbr,
+                        "name": p_name,
+                        "saves": svs,
+                        "goalsConceded": ga,
+                        "starter": is_starter,
+                        "matchDate": date_mx[5:],
+                        "matchScore": short_score_label,
+                        "result": result_letter
+                    })
+                elif sh > 0 or sot > 0 or gls > 0 or is_starter or subbed_in:
+                    player_perf.append({
+                        "teamId": t_id,
+                        "team": t_abbr,
+                        "name": p_name,
+                        "pos": pos,
+                        "shots": sh,
+                        "sot": sot,
+                        "goals": gls,
+                        "assists": ast,
+                        "starter": is_starter,
+                        "subbedIn": subbed_in,
+                        "matchDate": date_mx[5:],
+                        "matchScore": short_score_label,
+                        "result": result_letter
+                    })
+
+        # Si el boxscore oficial no reportó tiros, usar la suma exacta de la plantilla de ese partido
+        shots_pair = [
+            h_official["shots"] if h_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == home_id_str),
+            a_official["shots"] if a_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == away_id_str),
+        ]
+        sot_pair = [
+            h_official["sot"] if h_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == home_id_str),
+            a_official["sot"] if a_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == away_id_str),
+        ]
+        saves_pair = [
+            h_official["saves"] if h_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == home_id_str),
+            a_official["saves"] if a_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == away_id_str),
+        ]
+        corners_pair = [h_official["corners"], a_official["corners"]]
+        total_cards_pair = [h_official["cards"], a_official["cards"]]
+        poss_pair = [h_official["possession"], a_official["possession"]]
+
         scorers, cards, substitutions = [], [], []
         for ev in data.get("keyEvents", []):
             ev_type = ev.get("type", {}).get("text", "").lower()
@@ -271,68 +452,6 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
 
         home_rows = build_pitch_rows_from_roster(home_roster_obj.get("roster", []))
         away_rows = build_pitch_rows_from_roster(away_roster_obj.get("roster", []))
-
-        player_perf, gk_perf = [], []
-        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
-            t_abbr = home_abbr if r_idx == 0 else away_abbr
-            t_id = home_id_str if r_idx == 0 else away_id_str
-            for p in r_obj.get("roster", []):
-                ath = p.get("athlete", {})
-                p_name = ath.get("displayName", "Jugador")
-                pos = p.get("position", {}).get("abbreviation", "M")
-                is_starter = bool(p.get("starter", False))
-                subbed_in = bool(p.get("subbedIn", False))
-
-                st_map = {s.get("name"): safe_float(s.get("value", 0)) for s in p.get("stats", [])}
-                sh = int(st_map.get("totalShots", 0))
-                sot = int(st_map.get("shotsOnTarget", 0))
-                gls = int(st_map.get("totalGoals", 0))
-                svs = int(st_map.get("saves", 0))
-                ga = int(st_map.get("goalsConceded", 0))
-
-                if pos == "G" and (is_starter or svs > 0 or subbed_in):
-                    gk_perf.append({
-                        "teamId": t_id,
-                        "team": t_abbr,
-                        "name": p_name,
-                        "saves": svs,
-                        "goalsConceded": ga,
-                        "starter": is_starter,
-                        "matchDate": date_mx[5:],
-                        "matchScore": short_score_label,
-                        "result": result_letter
-                    })
-                elif sh > 0 or sot > 0 or gls > 0 or is_starter or subbed_in:
-                    player_perf.append({
-                        "teamId": t_id,
-                        "team": t_abbr,
-                        "name": p_name,
-                        "pos": pos,
-                        "shots": sh,
-                        "sot": sot,
-                        "goals": gls,
-                        "starter": is_starter,
-                        "subbedIn": subbed_in,
-                        "matchDate": date_mx[5:],
-                        "matchScore": short_score_label,
-                        "result": result_letter
-                    })
-
-        if shots_pair == [0, 0]:
-            shots_pair = [
-                sum(p["shots"] for p in player_perf if p["team"] == home_abbr),
-                sum(p["shots"] for p in player_perf if p["team"] == away_abbr),
-            ]
-        if sot_pair == [0, 0]:
-            sot_pair = [
-                sum(p["sot"] for p in player_perf if p["team"] == home_abbr),
-                sum(p["sot"] for p in player_perf if p["team"] == away_abbr),
-            ]
-        if saves_pair == [0, 0]:
-            saves_pair = [
-                sum(g["saves"] for g in gk_perf if g["team"] == home_abbr),
-                sum(g["saves"] for g in gk_perf if g["team"] == away_abbr),
-            ]
 
         parsed_obj = {
             "id": str(event_id),
@@ -408,20 +527,16 @@ async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id
 
 
 def analyze_team_tactical_style(last5_list, team_name, is_home=True):
-    """
-    Evalúa minuciosamente cómo juega el equipo en sus últimos 5 partidos:
-    - ¿Golea o gana por 1 gol y se encierra?
-    - ¿Es ofensivo de posesión o defensivo de bloque bajo?
-    """
     if not last5_list:
         return {
-            "styleTag": "Equilibrado",
-            "avgGoalsFor": 1.4,
-            "avgGoalsAgainst": 1.1,
+            "styleTag": "Sin historial reciente",
+            "avgGoalsFor": 0.0,
+            "avgGoalsAgainst": 0.0,
             "oneGoalWins": 0,
             "blowoutWins": 0,
             "parkTheBusRisk": False,
-            "summary": f"{team_name} mantiene bloque estándar como {'Local' if is_home else 'Visitante'}."
+            "isScoringMachine": False,
+            "summary": f"Cargando registros oficiales de {team_name}."
         }
 
     n = len(last5_list)
@@ -433,7 +548,6 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
     avg_sot = round(sum(m["_mySoT"] for m in last5_list) / n, 1)
     avg_poss = round(sum(m["_myPossession"] for m in last5_list) / n, 1)
 
-    # Detectar si mete 1 gol y se encierra (marcadores 1-0, 0-0, 1-1 con pocos goles recibidos)
     low_scoring_games = sum(1 for m in last5_list if m["_totalGoals"] <= 2)
     one_goal_wins = sum(1 for m in last5_list if m["_myGoals"] == 1 and m["_oppGoals"] == 0)
     blowout_games = sum(1 for m in last5_list if m["_myGoals"] >= 3)
@@ -444,19 +558,19 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
     if park_the_bus:
         style_tag = "🛡️ Cerrojo Táctico (Mete 1 gol y cierra espacios)"
         explanation = (
-            f"OJO TÁCTICO: En {low_scoring_games} de sus últimos {n} juegos hubo ≤2 goles "
-            f"(promedia {avg_gf} goles a favor y {avg_ga} en contra). Suele adelantar líneas, marcar 1 gol y replegarse."
+            f"En {low_scoring_games} de sus últimos {n} juegos hubo ≤2 goles "
+            f"(promedia {avg_gf} goles a favor y {avg_ga} en contra). Suele marcar 1 gol y replegarse."
         )
     elif is_scoring_machine:
         style_tag = "🔥 Aplanadora Ofensiva (Volumen alto y goleadas)"
         explanation = (
-            f"Viene goleando: promedia {avg_gf} goles y {avg_sot} tiros al arco por partido "
-            f"({blowout_games} partidos con 3+ goles en sus últimos {n}). No se encierra tras el 1-0."
+            f"Promedia {avg_gf} goles y {avg_sot} tiros al arco por partido "
+            f"({blowout_games} partidos con 3+ goles en sus últimos {n})."
         )
     elif avg_shots >= 14.0:
         style_tag = "⚡ Ataque Constante por Bandas (Alto volumen de tiros)"
         explanation = (
-            f"Genera {avg_shots} tiros por partido ({avg_poss}% posesión). Ideal para mercados de Tiros de Jugador y Córners."
+            f"Genera {avg_shots} tiros totales y {avg_sot} al arco por partido ({avg_poss}% posesión)."
         )
     else:
         style_tag = "⚖️ Transición y Orden Medio"
@@ -479,6 +593,12 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
     }
 
 
+@app.get("/")
+@app.get("/api/health")
+async def health_check():
+    return {"ok": True, "status": "online", "version": "6.0.0"}
+
+
 @app.get("/api/match-deep-stats")
 async def get_match_deep_stats(
     league_slug: str,
@@ -494,7 +614,6 @@ async def get_match_deep_stats(
             fetch_team_last_5(client, league_slug, away_id)
         )
 
-        # PUNTO 6: Verificar si el partido próximo YA TIENE ALINEACIÓN CONFIRMADA oficial
         confirmed_lineup = {"confirmed": False, "homeFormation": None, "awayFormation": None, "homeRows": [], "awayRows": []}
         if event_id:
             try:
@@ -534,10 +653,10 @@ async def get_match_deep_stats(
     away_sot_avg = round(sum(m["_mySoT"] for m in away_last5) / a_count, 1)
     home_goals_avg = round(sum(m["_myGoals"] for m in home_last5) / h_count, 2)
     away_goals_avg = round(sum(m["_myGoals"] for m in away_last5) / a_count, 2)
-    home_corners_avg = round(sum(m.get("_myCorners", 5) for m in home_last5) / h_count, 1)
-    away_corners_avg = round(sum(m.get("_myCorners", 4) for m in away_last5) / a_count, 1)
-    home_cards_avg = round(sum(m.get("_myCards", 2) for m in home_last5) / h_count, 1)
-    away_cards_avg = round(sum(m.get("_myCards", 2) for m in away_last5) / a_count, 1)
+    home_corners_avg = round(sum(m.get("_myCorners", 0) for m in home_last5) / h_count, 1)
+    away_corners_avg = round(sum(m.get("_myCorners", 0) for m in away_last5) / a_count, 1)
+    home_cards_avg = round(sum(m.get("_myCards", 0) for m in home_last5) / h_count, 1)
+    away_cards_avg = round(sum(m.get("_myCards", 0) for m in away_last5) / a_count, 1)
 
     agg_players, agg_gks = {}, {}
 
@@ -559,6 +678,7 @@ async def get_match_deep_stats(
                         "shots": 0,
                         "sot": 0,
                         "goals": 0,
+                        "assists": 0,
                         "matchLogs": []
                     }
                 agg_players[key]["games"] += 1
@@ -569,6 +689,7 @@ async def get_match_deep_stats(
                 agg_players[key]["shots"] += p["shots"]
                 agg_players[key]["sot"] += p["sot"]
                 agg_players[key]["goals"] += p["goals"]
+                agg_players[key]["assists"] += p.get("assists", 0)
                 agg_players[key]["matchLogs"].append({
                     "date": p["matchDate"],
                     "score": p["matchScore"],
@@ -576,6 +697,7 @@ async def get_match_deep_stats(
                     "shots": p["shots"],
                     "sot": p["sot"],
                     "goals": p["goals"],
+                    "assists": p.get("assists", 0),
                     "role": "Titular" if p["starter"] else "Suplente"
                 })
 
@@ -659,10 +781,11 @@ async def get_match_deep_stats(
             "totalShotsL5": sh["shots"],
             "totalSoTL5": sh["sot"],
             "goalsL5": sh["goals"],
+            "assistsL5": sh["assists"],
             "avgShots": avg_sh,
             "avgSoT": avg_sot,
             "xG": round(avg_sot * 0.32 + (sh["goals"] * 0.15), 2),
-            "l10HitRate": max(68, min(96, real_sot_hit_rate if real_sot_hit_rate > 0 else 80)),
+            "l10HitRate": max(65, min(96, real_sot_hit_rate if real_sot_hit_rate > 0 else 75)),
             "propLine": "1.0+ Tiros al Arco" if avg_sot >= 0.7 else "2.0+ Tiros Totales",
             "odd": 1.35 if avg_sot >= 1.3 else 1.48,
             "rotationStatus": "ROTACION" if is_rot else "TITULAR",
@@ -719,6 +842,7 @@ async def get_match_deep_stats(
         "goalkeepers": goalkeepers_list
     }
 
+
 async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient, league_id: str, date_yyyymmdd: str):
     league_info = LIVE_LEAGUES_MAP.get(league_id)
     if not league_info:
@@ -769,7 +893,6 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
                 home_abbr = home_team_obj.get("abbreviation", "LOC")
                 away_abbr = away_team_obj.get("abbreviation", "VIS")
 
-                # Extraer nombres reales de líderes de ambos equipos si ESPN los reporta en la previa
                 real_leaders = []
                 for c_obj in [home, away]:
                     t_short = c_obj.get("team", {}).get("abbreviation", home_abbr)
@@ -916,15 +1039,12 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
     }
 
 
-
 @app.post("/api/verify-tickets")
 async def auto_verify_tickets(payload: dict):
     """
-    Auto-Verificador 100% Fiel:
-    1. Convierte siempre la hora del partido a Hora de México (CDMX UTC-6), nunca EDT.
-    2. Cruza estadísticas de equipo desde boxscore + suma de rosters reales para que jamás marque 0 si hubo tiros/goles.
-    3. Limpia siglas (OSA, RMA, RAC) al buscar jugadores individuales.
-    4. Guarda las reglas de aprendizaje vinculadas ÚNICAMENTE a los equipos involucrados.
+    Auto-Verificador 100% Oficial:
+    Re-audita todos los partidos de los tickets (incluso los que habían quedado mal leídos antes)
+    usando las llaves exactas de ESPN (shotsOnGoal, shotsSummary, totalShots) y normalización sin acentos.
     """
     tickets = payload.get("tickets", [])
     learning_logs = payload.get("learningLogs", [])
@@ -947,7 +1067,7 @@ async def auto_verify_tickets(payload: dict):
 
                     header_comp = data.get("header", {}).get("competitions", [{}])[0]
                     st_type = header_comp.get("status", {}).get("type", {})
-                    state = st_type.get("state", "").lower()  # 'pre', 'in', 'post'
+                    state = st_type.get("state", "").lower()
                     completed = st_type.get("completed", False)
 
                     competitors = header_comp.get("competitors", [])
@@ -956,6 +1076,9 @@ async def auto_verify_tickets(payload: dict):
 
                     home_c = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
                     away_c = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+
+                    home_id_str = str(home_c.get("id", home_c.get("team", {}).get("id", "")))
+                    away_id_str = str(away_c.get("id", away_c.get("team", {}).get("id", "")))
                     home_score = safe_int(home_c.get("score", 0))
                     away_score = safe_int(away_c.get("score", 0))
                     home_name = home_c.get("team", {}).get("displayName", "")
@@ -963,7 +1086,6 @@ async def auto_verify_tickets(payload: dict):
                     home_abbr = home_c.get("team", {}).get("abbreviation", "")
                     away_abbr = away_c.get("team", {}).get("abbreviation", "")
 
-                    # PUNTO 2 CORREGIDO: Convertir SIEMPRE a Hora de México (CST UTC-6), jamás mostrar EDT
                     date_mx, time_mx = convert_utc_to_mexico(header_comp.get("date", ""))
                     if completed or state == "post":
                         status_label = "Final"
@@ -983,84 +1105,60 @@ async def auto_verify_tickets(payload: dict):
                     if not (completed or state == "post"):
                         continue
 
-                    # 1. Extraer primero las estadísticas jugador por jugador de rosters (Local = 0, Visita = 1)
+                    # 1. Emparejar boxscore por team.id exacto (para que Osasuna sea 15 remates y 4 al arco, y Real Madrid 17 y 8)
+                    box_teams = data.get("boxscore", {}).get("teams", [])
+                    home_box_obj, away_box_obj = {}, {}
+                    for bt in box_teams:
+                        bt_id = str(bt.get("team", {}).get("id", ""))
+                        if bt_id == home_id_str:
+                            home_box_obj = bt
+                        elif bt_id == away_id_str:
+                            away_box_obj = bt
+                    if not home_box_obj and len(box_teams) > 0:
+                        home_box_obj = box_teams[0]
+                    if not away_box_obj and len(box_teams) > 1:
+                        away_box_obj = box_teams[1]
+
+                    h_official = extract_official_team_stats_from_boxscore(home_box_obj)
+                    a_official = extract_official_team_stats_from_boxscore(away_box_obj)
+
+                    # 2. Extraer estadísticas individuales de jugadores en rosters
                     rosters = data.get("rosters", [])
                     all_roster_players = []
-                    roster_team_totals = [
-                        {"shots": 0, "sot": 0, "saves": 0},
-                        {"shots": 0, "sot": 0, "saves": 0}
-                    ]
+                    home_roster_shots, away_roster_shots = 0, 0
+                    home_roster_sot, away_roster_sot = 0, 0
 
-                    for r_idx, r_obj in enumerate(rosters[:2]):
+                    for r_obj in rosters:
+                        r_tid = str(r_obj.get("team", {}).get("id", ""))
+                        is_home_r = (r_tid == home_id_str)
                         for p in r_obj.get("roster", []):
                             ath = p.get("athlete", {})
-                            st_map = {s.get("name"): safe_float(s.get("value", 0)) for s in p.get("stats", [])}
-                            sh = int(st_map.get("totalShots", st_map.get("shotsSummary", 0)))
-                            sot = int(st_map.get("shotsOnTarget", st_map.get("onTargetScoringAttempts", 0)))
-                            gls = int(st_map.get("totalGoals", 0))
-                            svs = int(st_map.get("saves", 0))
-
-                            # Si anotó gol, como mínimo tuvo ese tiro al arco
-                            if gls > sot:
-                                sot = gls
-                            if sot > sh:
-                                sh = sot
-
-                            roster_team_totals[r_idx]["shots"] += sh
-                            roster_team_totals[r_idx]["sot"] += sot
-                            roster_team_totals[r_idx]["saves"] += svs
+                            p_st = extract_player_stats_from_entry(p)
+                            if is_home_r:
+                                home_roster_shots += p_st["shots"]
+                                home_roster_sot += p_st["sot"]
+                            else:
+                                away_roster_shots += p_st["shots"]
+                                away_roster_sot += p_st["sot"]
 
                             all_roster_players.append({
                                 "name": ath.get("displayName", ""),
                                 "shortName": ath.get("shortName", ""),
+                                "normName": normalize_text(ath.get("displayName", "")),
+                                "normShort": normalize_text(ath.get("shortName", "")),
                                 "starter": bool(p.get("starter", False)),
                                 "subbedIn": bool(p.get("subbedIn", False)),
-                                "shots": sh,
-                                "sot": sot,
-                                "goals": gls,
-                                "saves": svs,
+                                **p_st
                             })
 
-                    # 2. Extraer estadísticas de equipos desde boxscore con respaldo de rosters
-                    box_teams = data.get("boxscore", {}).get("teams", [])
-                    def get_team_stat(idx, keys, fallback_val=0):
-                        if idx < len(box_teams):
-                            for st in box_teams[idx].get("statistics", []):
-                                if st.get("name") in keys:
-                                    raw = str(st.get("displayValue", "0")).strip()
-                                    # A veces ESPN envía "15 (4)" en shotsSummary
-                                    first_num = re.findall(r"\d+", raw)
-                                    val = int(first_num[0]) if first_num else 0
-                                    if val > 0:
-                                        return val
-                        return fallback_val
+                    # Usar SIEMPRE el número oficial del boxscore (ej. 15 y 4 para Osasuna, 17 y 8 para Real Madrid)
+                    home_shots = h_official["shots"] if h_official["shots"] > 0 else home_roster_shots
+                    away_shots = a_official["shots"] if a_official["shots"] > 0 else away_roster_shots
+                    home_sot = h_official["sot"] if h_official["sot"] > 0 else home_roster_sot
+                    away_sot = a_official["sot"] if a_official["sot"] > 0 else away_roster_sot
 
-                    home_shots = max(
-                        get_team_stat(0, ["totalShots", "shotsSummary"], roster_team_totals[0]["shots"]),
-                        roster_team_totals[0]["shots"],
-                        home_score
-                    )
-                    away_shots = max(
-                        get_team_stat(1, ["totalShots", "shotsSummary"], roster_team_totals[1]["shots"]),
-                        roster_team_totals[1]["shots"],
-                        away_score
-                    )
-                    home_sot = max(
-                        get_team_stat(0, ["shotsOnTarget", "onTargetScoringAttempts"], roster_team_totals[0]["sot"]),
-                        roster_team_totals[0]["sot"],
-                        home_score
-                    )
-                    away_sot = max(
-                        get_team_stat(1, ["shotsOnTarget", "onTargetScoringAttempts"], roster_team_totals[1]["sot"]),
-                        roster_team_totals[1]["sot"],
-                        away_score
-                    )
-
-                    total_corners = get_team_stat(0, ["wonCorners", "cornerKicks"]) + get_team_stat(1, ["wonCorners", "cornerKicks"])
-                    total_cards = (
-                        get_team_stat(0, ["yellowCards"]) + get_team_stat(1, ["yellowCards"]) +
-                        get_team_stat(0, ["redCards"]) + get_team_stat(1, ["redCards"])
-                    )
+                    total_corners = h_official["corners"] + a_official["corners"]
+                    total_cards = h_official["cards"] + a_official["cards"]
 
                     market = leg.get("market", "").upper()
                     selection = leg.get("selection", "")
@@ -1070,7 +1168,6 @@ async def auto_verify_tickets(payload: dict):
                     actual_val = 0
                     hit_result = False
 
-                    # PUNTO 1 CORREGIDO: Clasificación exacta de cada mercado de Equipo vs Jugador
                     is_player_prop = ("B+" in market) or ("JUGADOR" in market) or ("GOLEADOR" in market) or ("PORTERO" in market)
 
                     if "GOLES TOTALES" in market or "GOLES 1RA" in market:
@@ -1085,53 +1182,51 @@ async def auto_verify_tickets(payload: dict):
                         target_line = away_score
                         hit_result = home_score >= away_score
                     elif "GANADOR" in market or "GANA PA" in market or "RESULTADO" in market:
-                        is_home_pick = home_name.lower() in selection.lower() or home_abbr.lower() in selection.lower()
+                        norm_sel = normalize_text(selection)
+                        is_home_pick = normalize_text(home_name) in norm_sel or normalize_text(home_abbr) in norm_sel
                         actual_val = home_score if is_home_pick else away_score
                         opp_val = away_score if is_home_pick else home_score
                         target_line = opp_val + 1
                         hit_result = actual_val > opp_val
-                    elif "CÓRNERS" in market:
+                    elif "CÓRNERS" in market or "CORNERS" in market:
                         actual_val = total_corners
                         hit_result = actual_val > target_line
                     elif "TARJETAS" in market:
                         actual_val = total_cards
                         hit_result = actual_val > target_line
                     elif not is_player_prop and "TIROS AL ARCO" in market:
-                        # Ejemplo: "Osasuna | 4.0+" en "TOTAL DE TIROS AL ARCO 90'"
-                        sel_prefix = selection.split("|")[0].strip().lower()
+                        sel_prefix = normalize_text(selection.split("|")[0])
                         is_home_pick = (
-                            sel_prefix in home_name.lower()
-                            or home_name.lower() in sel_prefix
-                            or home_abbr.lower() in sel_prefix
+                            sel_prefix in normalize_text(home_name)
+                            or normalize_text(home_name) in sel_prefix
+                            or normalize_text(home_abbr) == sel_prefix
                         )
                         actual_val = home_sot if is_home_pick else away_sot
                         hit_result = actual_val >= target_line
                     elif not is_player_prop and "TIROS" in market:
-                        # Ejemplo: "Osasuna | 10.0+" en "TOTAL DE TIROS EQUIPO 90'"
-                        sel_prefix = selection.split("|")[0].strip().lower()
+                        sel_prefix = normalize_text(selection.split("|")[0])
                         is_home_pick = (
-                            sel_prefix in home_name.lower()
-                            or home_name.lower() in sel_prefix
-                            or home_abbr.lower() in sel_prefix
+                            sel_prefix in normalize_text(home_name)
+                            or normalize_text(home_name) in sel_prefix
+                            or normalize_text(home_abbr) == sel_prefix
                         )
                         actual_val = home_shots if is_home_pick else away_shots
                         hit_result = actual_val >= target_line
                     else:
-                        # Es un mercado de JUGADOR (ej. "Ante Budimir OSA | 1.0+" o "Sergio Canales RAC | 2.0+")
+                        # Búsqueda de jugador sin importar acentos ni siglas (ej. "Kylian Mbappé RMA | 1.0+")
                         raw_left = selection.split("|")[0].split("(")[0].strip()
-                        # Quitar la sigla del equipo en mayúsculas al final (ej. "OSA", "RMA", "RAC")
                         tokens = raw_left.split()
                         if len(tokens) > 1 and tokens[-1].isupper() and len(tokens[-1]) <= 4:
                             tokens = tokens[:-1]
-                        clean_player_name = " ".join(tokens).lower()
-                        last_name = tokens[-1].lower() if tokens else clean_player_name
+                        clean_player_norm = normalize_text(" ".join(tokens))
+                        last_name_norm = normalize_text(tokens[-1]) if tokens else clean_player_norm
 
                         matched_p = next(
                             (
                                 rp for rp in all_roster_players
-                                if clean_player_name in rp["name"].lower()
-                                or rp["name"].lower() in clean_player_name
-                                or (len(last_name) >= 4 and last_name in rp["name"].lower())
+                                if clean_player_norm in rp["normName"]
+                                or rp["normName"] in clean_player_norm
+                                or (len(last_name_norm) >= 4 and last_name_norm in rp["normName"])
                             ),
                             None
                         )
@@ -1143,6 +1238,9 @@ async def auto_verify_tickets(payload: dict):
                                 actual_val = matched_p["saves"]
                             elif "GOLEADOR" in market:
                                 actual_val = matched_p["goals"]
+                                target_line = 1
+                            elif "ASISTENCIA" in market:
+                                actual_val = matched_p["assists"]
                                 target_line = 1
                             elif "ARCO" in market:
                                 actual_val = matched_p["sot"]
@@ -1156,22 +1254,28 @@ async def auto_verify_tickets(payload: dict):
                     leg["hit"] = bool(hit_result)
                     updated_any = True
 
-                    # PUNTO 3: Si falló o acertó, crear aprendizaje exclusivo para los equipos de este partido
                     target_teams_list = [
-                        home_name.lower(),
-                        away_name.lower(),
-                        home_abbr.lower(),
-                        away_abbr.lower()
+                        normalize_text(home_name),
+                        normalize_text(away_name),
+                        normalize_text(home_abbr),
+                        normalize_text(away_abbr)
                     ]
-                    if prev_hit is None and not hit_result:
+                    rule_id = f"auto-learn-{match_id}-{normalize_text(market)}"
+                    already_logged = any(l.get("id") == rule_id for l in learning_logs)
+
+                    if not already_logged:
                         learning_logs.insert(0, {
-                            "id": f"auto-learn-{match_id}-{len(learning_logs)}",
-                            "tag": f"AJUSTE ESPECÍFICO ({home_abbr} / {away_abbr}): {market}",
-                            "source": f"Partido: {home_name} {home_score}-{away_score} {away_name}",
+                            "id": rule_id,
+                            "tag": f"{'✅ ACIERTO' if hit_result else '🛠️ CORRECCIÓN'} ({home_abbr}/{away_abbr}): {market}",
+                            "source": f"Verificado: {home_name} {home_score}-{away_score} {away_name}",
                             "targetTeams": target_teams_list,
                             "marketType": market,
-                            "outcome": "FAIL",
-                            "rule": f"Exclusivo para {home_name} / {away_name}: '{selection}' cerró en {actual_val} (meta {target_line}). En próximos partidos de este equipo se reducirá la línea en {market}."
+                            "outcome": "WIN" if hit_result else "FAIL",
+                            "rule": (
+                                f"Exclusivo [{home_name} / {away_name}]: '{selection}' cumplió con {actual_val} (meta {target_line}). Se refuerza este mercado para estos clubes."
+                                if hit_result
+                                else f"Exclusivo [{home_name} / {away_name}]: '{selection}' hizo {actual_val} (meta {target_line}). Se ajusta la exigencia en {market} únicamente cuando jueguen estos equipos."
+                            )
                         })
                 except Exception:
                     continue
@@ -1180,8 +1284,9 @@ async def auto_verify_tickets(payload: dict):
         "ok": True,
         "updated": updated_any,
         "tickets": tickets,
-        "learningLogs": learning_logs[:20]
+        "learningLogs": learning_logs[:25]
     }
+
 
 @app.get("/api/history")
 async def get_permanent_history():

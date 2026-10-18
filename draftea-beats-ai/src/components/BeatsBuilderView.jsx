@@ -21,50 +21,86 @@ import { triggerHaptic } from '../utils/haptics';
  * Analiza cada uno de los últimos 5 partidos individualmente para no dejarse engañar
  * por un partido aislado donde hicieron 18 tiros y otro donde hicieron 2.
  */
+// En src/components/BeatsBuilderView.jsx, reemplaza la función analyzeMatchByMatchMetrics por esta:
+
 function analyzeMatchByMatchMetrics(match, deepData, learningLogs = []) {
   const recentHome = deepData?.recentMatches?.home || [];
   const recentAway = deepData?.recentMatches?.away || [];
   const stats = deepData?.statsL10 || match.statsL10;
 
-  // Extraer tiros al arco partido por partido del Local y del Visitante
+  const homeNameLower = match.homeTeam.name.toLowerCase();
+  const awayNameLower = match.awayTeam.name.toLowerCase();
+  const homeShortLower = match.homeTeam.short.toLowerCase();
+  const awayShortLower = match.awayTeam.short.toLowerCase();
+
+  // PUNTO 3: Filtrar en el historial de aprendizaje SOLO las reglas que pertenezcan a los 2 equipos de este partido
+  const teamSpecificLogs = learningLogs.filter((log) => {
+    if (!Array.isArray(log.targetTeams) || log.targetTeams.length === 0) {
+      return false; // No aplicar reglas genéricas a todos los equipos
+    }
+    return log.targetTeams.some(
+      (kw) =>
+        homeNameLower.includes(kw) ||
+        awayNameLower.includes(kw) ||
+        homeShortLower === kw ||
+        awayShortLower === kw
+    );
+  });
+
+  // ¿Hubo un fallo previo en Goles Totales específicamente con alguno de estos dos equipos?
+  const teamFailedGoalsBefore = teamSpecificLogs.some(
+    (l) =>
+      l.outcome === 'FAIL' &&
+      (l.marketType?.includes('GOLES') || l.tag?.includes('GOLES'))
+  );
+
+  // ¿Hubo un fallo previo en Tiros al Arco de Equipo específicamente con alguno de estos dos clubes?
+  const teamFailedSotBefore = teamSpecificLogs.some(
+    (l) =>
+      l.outcome === 'FAIL' &&
+      (l.marketType?.includes('TIROS AL ARCO') || l.tag?.includes('TIROS AL ARCO'))
+  );
+
+  // ¿Hubo un ticket ganador confirmado específicamente con estos clubes?
+  const teamWonBefore = teamSpecificLogs.some((l) => l.outcome === 'WIN');
+
   const homeSotList = recentHome.map((m) => Number(m._mySoT ?? m.stats?.sot?.[0] ?? 4));
   const awaySotList = recentAway.map((m) => Number(m._mySoT ?? m.stats?.sot?.[1] ?? 3));
   const homeShotsList = recentHome.map((m) => Number(m._myShots ?? m.stats?.shots?.[0] ?? 12));
 
-  // Filtrar específicamente cómo le va al Local jugando en CASA y al Visitante jugando de VISITA
-  const homeAtHomeMatches = recentHome.filter((m) =>
-    m.homeName?.toLowerCase().includes(match.homeTeam.name.toLowerCase().slice(0, 5))
-  );
-  const awayAtAwayMatches = recentAway.filter((m) =>
-    m.awayName?.toLowerCase().includes(match.awayTeam.name.toLowerCase().slice(0, 5))
-  );
-
-  // Calcular PISO SEGURO (Percentil bajo partido por partido, NUNCA el promedio inflado)
-  // Y aplicar TOPE MÁXIMO estilo Draftea (3.0+ a 5.0+ Tiros al Arco en Seguro)
   const calcSafeFloor = (arr, fallback, maxCap) => {
     if (!arr || arr.length === 0) return Math.min(maxCap, fallback);
     const sorted = [...arr].sort((a, b) => a - b);
-    // Tomamos el 2do valor más bajo de los 5 partidos (garantiza que se cumplió en al menos 4 de 5 juegos)
     const idx = sorted.length >= 4 ? 1 : 0;
     const rawFloor = Math.max(2, sorted[idx]);
     return Math.min(maxCap, rawFloor);
   };
 
-  const safeHomeSotLine = calcSafeFloor(homeSotList, 4, 5); // Jamás pondrá 8.0+ ni 11.0+ en Seguro
+  // Si este equipo específico falló antes en tiros al arco, le bajamos 1 punto extra su línea; a los demás equipos no los toca
+  const rawSafeHomeSot = calcSafeFloor(homeSotList, 4, 5);
+  const safeHomeSotLine = teamFailedSotBefore
+    ? Math.max(2, rawSafeHomeSot - 1)
+    : rawSafeHomeSot;
+
   const safeAwaySotLine = calcSafeFloor(awaySotList, 3, 4);
   const safeHomeShotsLine = calcSafeFloor(homeShotsList, 10, 12);
 
-  // Cuántos de los últimos 5 partidos cumplieron esa línea exacta
   const homeSotHits = homeSotList.filter((v) => v >= safeHomeSotLine).length;
   const homeSotTotal = Math.max(1, homeSotList.length);
 
-  // Verificar partido por partido los goles (cuántos juegos tuvieron 2+ goles y cuántos se quedaron en 0-1)
   const allRecent = [...recentHome, ...recentAway];
-  const gamesOver15 = allRecent.filter((m) => (m._totalGoals ?? (m.homeScore + m.awayScore)) >= 2).length;
-  const gamesOneGoalOrLess = allRecent.filter((m) => (m._totalGoals ?? (m.homeScore + m.awayScore)) <= 1).length;
+  const gamesOver15 = allRecent.filter(
+    (m) => (m._totalGoals ?? m.homeScore + m.awayScore) >= 2
+  ).length;
+  const gamesOneGoalOrLess = allRecent.filter(
+    (m) => (m._totalGoals ?? m.homeScore + m.awayScore) <= 1
+  ).length;
 
-  // Verificar si el algoritmo aprendió a ser más estricto en goles o tiros por fallos previos
-  const hasStrictGoalRule = learningLogs.some((l) => l.tag?.includes('GOLES'));
+  const memoryBadgeNote = teamFailedGoalsBefore
+    ? ` • 🧠 Ajuste exclusivo aplicado a ${match.homeTeam.short}/${match.awayTeam.short} por tu ticket previo`
+    : teamWonBefore
+    ? ` • ✅ Patrón ganador previo confirmado en ${match.homeTeam.short}/${match.awayTeam.short}`
+    : '';
 
   return {
     safeHomeSotLine,
@@ -72,13 +108,14 @@ function analyzeMatchByMatchMetrics(match, deepData, learningLogs = []) {
     safeHomeShotsLine,
     homeSotConsistencyText:
       homeSotList.length > 0
-        ? `Partidos L${homeSotList.length}: [${homeSotList.join(', ')}] al arco (${homeSotHits}/${homeSotTotal} verdes)`
-        : `Línea conservadora ajustada por localía (${safeHomeSotLine}.0+ al arco)`,
-    homeVenueCount: homeAtHomeMatches.length,
-    awayVenueCount: awayAtAwayMatches.length,
+        ? `Partidos L${homeSotList.length}: [${homeSotList.join(', ')}] al arco (${homeSotHits}/${homeSotTotal} verdes)${memoryBadgeNote}`
+        : `Línea conservadora ajustada por localía (${safeHomeSotLine}.0+ al arco)${memoryBadgeNote}`,
     gamesOver15,
     totalEvaluatedGames: allRecent.length,
-    isHighRiskUnder: gamesOneGoalOrLess >= 3 || hasStrictGoalRule,
+    // Solo baja de ↑ 1.5 a ↑ 0.5 si ESTOS equipos tienen tendencia a ≤1 gol o si TÚ subiste un ticket donde ESTE equipo falló goles
+    isHighRiskUnder: gamesOneGoalOrLess >= 3 || teamFailedGoalsBefore,
+    teamFailedGoalsBefore,
+    teamWonBefore,
     stats
   };
 }

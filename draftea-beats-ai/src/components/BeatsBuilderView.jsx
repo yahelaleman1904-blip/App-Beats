@@ -553,7 +553,7 @@ export default function BeatsBuilderView({
     variantOffset
   ]);
 
-  const handleSaveTicket = () => {
+const handleSaveTicket = () => {
     if (generatedTicket.legs.length === 0) return;
     triggerHaptic('success');
 
@@ -577,16 +577,16 @@ export default function BeatsBuilderView({
       avgLegProb: generatedTicket.avgLegProb,
       ticketProb: generatedTicket.ticketHitProbability,
       status: 'PENDING',
+      archived: false, // Permite ocultarlo visualmente sin borrarlo del % histórico
       legs: generatedTicket.legs.map((l) => ({
         ...l,
-        hit: true
+        hit: null // <--- PUNTO 1: Nace PENDIENTE / EN CURSO hasta que se juegue el partido
       }))
     });
 
     setSavedBanner(true);
     setTimeout(() => setSavedBanner(false), 3000);
   };
-
   return (
     <div className="space-y-4">
       <div className="bg-[#141824] border border-gray-800 rounded-2xl p-4 space-y-4">

@@ -6,6 +6,7 @@ import StatsExplorerView from './components/StatsExplorerView';
 import BeatsBuilderView from './components/BeatsBuilderView';
 import HistoryVaultView from './components/HistoryVaultView';
 import { INITIAL_HISTORY_TICKETS, INITIAL_LEARNING_LOGS } from './data/historyData';
+import { FAVORITE_TEAMS } from './data/leaguesData';
 import { purgeExpiredMatchesCache } from './utils/cacheCleaner';
 import { API_BASE_URL } from './utils/apiConfig';
 
@@ -19,7 +20,6 @@ export default function App() {
   const [liveMatches, setLiveMatches] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Estado compartido con plantillas reales, historial L5 de porteros/jugadores y análisis táctico
   const [deepDataMap, setDeepDataMap] = useState({});
   const [loadingDeepId, setLoadingDeepId] = useState(null);
 
@@ -40,7 +40,6 @@ export default function App() {
     const fetchLiveCartelera = async () => {
       setIsLoading(true);
       try {
-        // AQUÍ YA USA API_BASE_URL (Funciona en tu PC y en la nube)
         const res = await fetch(`${API_BASE_URL}/api/cartelera-global?days_ahead=6`);
         const data = await res.json();
         if (data.ok && Array.isArray(data.matches)) {
@@ -60,14 +59,13 @@ export default function App() {
     if (!match || !match.homeTeam?.teamApiId || !match.awayTeam?.teamApiId) return;
     setLoadingDeepId(match.id);
     try {
-      // AQUÍ TAMBIÉN YA USA API_BASE_URL
       const url = `${API_BASE_URL}/api/match-deep-stats?league_slug=${encodeURIComponent(
         match.leagueSlug || 'mex.1'
       )}&home_id=${encodeURIComponent(match.homeTeam.teamApiId)}&away_id=${encodeURIComponent(
         match.awayTeam.teamApiId
       )}&home_abbr=${encodeURIComponent(match.homeTeam.short)}&away_abbr=${encodeURIComponent(
         match.awayTeam.short
-      )}`;
+      )}&event_id=${encodeURIComponent(match.id)}`;
 
       const res = await fetch(url);
       const data = await res.json();
@@ -93,10 +91,32 @@ export default function App() {
   }, [savedTickets]);
 
   const globalAccuracy = useMemo(() => {
-    const totalLegs = savedTickets.reduce((acc, t) => acc + t.legs.length, 0);
-    const hitLegs = savedTickets.reduce((acc, t) => acc + t.legs.filter((l) => l.hit).length, 0);
-    return totalLegs > 0 ? ((hitLegs / totalLegs) * 100).toFixed(1) : '91.9';
+    const settledLegs = savedTickets.reduce(
+      (acc, t) => acc + t.legs.filter((l) => l.hit === true || l.hit === false).length,
+      0
+    );
+    const hitLegs = savedTickets.reduce(
+      (acc, t) => acc + t.legs.filter((l) => l.hit === true).length,
+      0
+    );
+    return settledLegs > 0 ? ((hitLegs / settledLegs) * 100).toFixed(1) : '91.9';
   }, [savedTickets]);
+
+  const isMatchPinned = useCallback(
+    (match) => {
+      if (!pinnedTeams.length) return false;
+      const activeFavs = FAVORITE_TEAMS.filter((f) => pinnedTeams.includes(f.id));
+      return activeFavs.some((fav) => {
+        const cleanFav = fav.name.toLowerCase().replace('fc ', '').replace('club ', '').trim();
+        const homeName = match.homeTeam.name.toLowerCase();
+        const awayName = match.awayTeam.name.toLowerCase();
+        const nameMatches = homeName.includes(cleanFav) || awayName.includes(cleanFav);
+        const allowedLeagues = [fav.league, 'UCL', 'UEL', 'FA_CUP', 'LIBERTADORES', 'SUDAMERICANA'];
+        return nameMatches && allowedLeagues.includes(match.leagueId);
+      });
+    },
+    [pinnedTeams]
+  );
 
   const handleToggleLeague = (id) => {
     if (id === 'ALL') return setSelectedLeagues([]);
@@ -130,8 +150,12 @@ export default function App() {
           ...tk,
           legs: tk.legs.map((leg) => {
             if (leg.legId !== legId) return leg;
-            const nextHit = !leg.hit;
-            if (!nextHit) {
+            let nextHit;
+            if (leg.hit === null || leg.hit === undefined) nextHit = true;
+            else if (leg.hit === true) nextHit = false;
+            else nextHit = null;
+
+            if (nextHit === false) {
               setLearningLogs((oldLogs) => [
                 {
                   id: `learn-${Date.now()}`,
@@ -159,6 +183,12 @@ export default function App() {
     );
   };
 
+  const handleToggleArchiveTicket = (ticketId) => {
+    setSavedTickets((p) =>
+      p.map((tk) => (tk.id === ticketId ? { ...tk, archived: !tk.archived } : tk))
+    );
+  };
+
   const filteredMatches = useMemo(() => {
     return liveMatches
       .filter((m) => {
@@ -169,13 +199,11 @@ export default function App() {
         return matchLeague && matchDate;
       })
       .sort((a, b) => {
-        const aPinned =
-          pinnedTeams.includes(a.homeTeam.id) || pinnedTeams.includes(a.awayTeam.id);
-        const bPinned =
-          pinnedTeams.includes(b.homeTeam.id) || pinnedTeams.includes(b.awayTeam.id);
+        const aPinned = isMatchPinned(a);
+        const bPinned = isMatchPinned(b);
         return Number(bPinned) - Number(aPinned);
       });
-  }, [liveMatches, selectedLeagues, selectedDates, pinnedTeams]);
+  }, [liveMatches, selectedLeagues, selectedDates, isMatchPinned]);
 
   return (
     <div className="min-h-screen bg-[#0b0d13] text-gray-100 pb-28">
@@ -203,7 +231,7 @@ export default function App() {
             {activeTab === 'stats' && (
               <StatsExplorerView
                 matches={filteredMatches}
-                pinnedTeams={pinnedTeams}
+                isMatchPinned={isMatchPinned}
                 deepDataMap={deepDataMap}
                 loadingDeepId={loadingDeepId}
                 onEnsureDeepStats={handleEnsureDeepStats}
@@ -230,6 +258,7 @@ export default function App() {
                 tickets={savedTickets}
                 onToggleLegResult={handleToggleLegResult}
                 onMarkAllTicketResult={handleMarkAllTicketResult}
+                onToggleArchiveTicket={handleToggleArchiveTicket}
                 learningLogs={learningLogs}
               />
             )}

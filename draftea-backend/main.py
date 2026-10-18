@@ -151,7 +151,7 @@ def build_pitch_rows_from_roster(roster_list):
 
 
 async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, event_id: str, target_team_id: str):
-    cache_key = f"summary_v5_{event_id}_{target_team_id}"
+    cache_key = f"summary_v6_{event_id}_{target_team_id}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
 
@@ -170,20 +170,44 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         home_c = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
         away_c = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
 
+        home_id_str = str(home_c.get("id", home_c.get("team", {}).get("id", "")))
+        away_id_str = str(away_c.get("id", away_c.get("team", {}).get("id", "")))
+
         home_name = home_c.get("team", {}).get("displayName", "Local")
         away_name = away_c.get("team", {}).get("displayName", "Visitante")
-        home_abbr = home_c.get("team", {}).get("abbreviation", "LOC")
-        away_abbr = away_c.get("team", {}).get("abbreviation", "VIS")
+        home_abbr = home_c.get("team", {}).get("abbreviation") or home_name[:3].upper()
+        away_abbr = away_c.get("team", {}).get("abbreviation") or away_name[:3].upper()
         home_score = safe_int(home_c.get("score", 0))
         away_score = safe_int(away_c.get("score", 0))
 
-        is_home_target = str(home_c.get("id")) == str(target_team_id)
+        # Mapa de ID de equipo -> Siglas y Nombre para que NUNCA salga () vacío en goles ni tarjetas
+        team_id_to_label = {
+            home_id_str: f"{home_abbr} • {home_name}",
+            away_id_str: f"{away_abbr} • {away_name}"
+        }
+
+        is_home_target = home_id_str == str(target_team_id)
         my_score = home_score if is_home_target else away_score
         opp_score = away_score if is_home_target else home_score
         result_letter = "W" if my_score > opp_score else ("D" if my_score == opp_score else "L")
 
         date_mx, _ = convert_utc_to_mexico(header_comp.get("date", ""))
         short_score_label = f"{home_abbr} {home_score}-{away_score} {away_abbr}"
+
+        # Extraer Rosters primero para mapear qué jugador pertenece a qué equipo
+        rosters = data.get("rosters", [])
+        home_roster_obj = rosters[0] if len(rosters) > 0 else {}
+        away_roster_obj = rosters[1] if len(rosters) > 1 else {}
+
+        player_to_team_label = {}
+        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
+            t_label = home_abbr if r_idx == 0 else away_abbr
+            for p in r_obj.get("roster", []):
+                ath = p.get("athlete", {})
+                if ath.get("displayName"):
+                    player_to_team_label[ath.get("displayName")] = t_label
+                if ath.get("shortName"):
+                    player_to_team_label[ath.get("shortName")] = t_label
 
         box_teams = data.get("boxscore", {}).get("teams", [])
         def get_stat_pair(stat_keys):
@@ -200,20 +224,29 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         corners_pair = get_stat_pair(["wonCorners", "cornerKicks"])
         yellows_pair = get_stat_pair(["yellowCards"])
         reds_pair = get_stat_pair(["redCards"])
-        # Total de Tarjetas (Amarillas + Rojas)
         total_cards_pair = [yellows_pair[0] + reds_pair[0], yellows_pair[1] + reds_pair[1]]
         saves_pair = get_stat_pair(["saves"])
         poss_pair = get_stat_pair(["possessionPct"])
         if poss_pair == [0, 0]:
             poss_pair = [50, 50]
 
+        # PUNTO 4: Identificar siempre de qué equipo fue cada gol y cada tarjeta
         scorers, cards, substitutions = [], [], []
         for ev in data.get("keyEvents", []):
             ev_type = ev.get("type", {}).get("text", "").lower()
             clock = ev.get("clock", {}).get("displayValue", "45'")
-            team_short = ev.get("team", {}).get("abbreviation", "")
             participants = ev.get("participants", [])
             main_player = participants[0].get("athlete", {}).get("displayName", "Jugador") if participants else "Jugador"
+
+            ev_team_obj = ev.get("team", {})
+            ev_team_id = str(ev_team_obj.get("id", ""))
+            team_short = (
+                ev_team_obj.get("abbreviation")
+                or ev_team_obj.get("displayName")
+                or team_id_to_label.get(ev_team_id)
+                or player_to_team_label.get(main_player)
+                or home_abbr
+            )
 
             if "goal" in ev_type or "penalty - scored" in ev_type:
                 scorers.append({"team": team_short, "player": main_player, "min": clock})
@@ -232,10 +265,6 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
                     "note": f"Cambio al {clock}"
                 })
 
-        rosters = data.get("rosters", [])
-        home_roster_obj = rosters[0] if len(rosters) > 0 else {}
-        away_roster_obj = rosters[1] if len(rosters) > 1 else {}
-
         home_formation = home_roster_obj.get("formation", "4-2-3-1") or "4-2-3-1"
         away_formation = away_roster_obj.get("formation", "4-3-3") or "4-3-3"
 
@@ -245,7 +274,7 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         player_perf, gk_perf = [], []
         for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
             t_abbr = home_abbr if r_idx == 0 else away_abbr
-            t_id = str(home_c.get("id")) if r_idx == 0 else str(away_c.get("id"))
+            t_id = home_id_str if r_idx == 0 else away_id_str
             for p in r_obj.get("roster", []):
                 ath = p.get("athlete", {})
                 p_name = ath.get("displayName", "Jugador")
@@ -332,6 +361,8 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
             "_rawGkPerf": gk_perf,
             "_myShots": shots_pair[0] if is_home_target else shots_pair[1],
             "_mySoT": sot_pair[0] if is_home_target else sot_pair[1],
+            "_myCorners": corners_pair[0] if is_home_target else corners_pair[1],
+            "_myCards": total_cards_pair[0] if is_home_target else total_cards_pair[1],
             "_myGoals": my_score,
             "_oppGoals": opp_score,
             "_myPossession": poss_pair[0] if is_home_target else poss_pair[1],
@@ -448,12 +479,42 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
 
 
 @app.get("/api/match-deep-stats")
-async def get_match_deep_stats(league_slug: str, home_id: str, away_id: str, home_abbr: str = "LOC", away_abbr: str = "VIS"):
+async def get_match_deep_stats(
+    league_slug: str,
+    home_id: str,
+    away_id: str,
+    home_abbr: str = "LOC",
+    away_abbr: str = "VIS",
+    event_id: str = ""
+):
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         home_last5, away_last5 = await asyncio.gather(
             fetch_team_last_5(client, league_slug, home_id),
             fetch_team_last_5(client, league_slug, away_id)
         )
+
+        # PUNTO 6: Verificar si el partido próximo YA TIENE ALINEACIÓN CONFIRMADA oficial
+        confirmed_lineup = {"confirmed": False, "homeFormation": None, "awayFormation": None, "homeRows": [], "awayRows": []}
+        if event_id:
+            try:
+                ev_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}"
+                ev_resp = await client.get(ev_url, headers=HEADERS)
+                if ev_resp.status_code == 200:
+                    ev_data = ev_resp.json()
+                    rosters = ev_data.get("rosters", [])
+                    if len(rosters) >= 2 and rosters[0].get("roster") and rosters[1].get("roster"):
+                        h_rows = build_pitch_rows_from_roster(rosters[0].get("roster", []))
+                        a_rows = build_pitch_rows_from_roster(rosters[1].get("roster", []))
+                        if h_rows and a_rows:
+                            confirmed_lineup = {
+                                "confirmed": True,
+                                "homeFormation": rosters[0].get("formation", "4-2-3-1") or "4-2-3-1",
+                                "awayFormation": rosters[1].get("formation", "4-3-3") or "4-3-3",
+                                "homeRows": h_rows,
+                                "awayRows": a_rows
+                            }
+            except Exception:
+                pass
 
     combined_matches = home_last5 + away_last5
     total_m = max(1, len(combined_matches))
@@ -465,12 +526,18 @@ async def get_match_deep_stats(league_slug: str, home_id: str, away_id: str, hom
 
     h_count = max(1, len(home_last5))
     a_count = max(1, len(away_last5))
+
     home_shots_avg = round(sum(m["_myShots"] for m in home_last5) / h_count, 1)
     away_shots_avg = round(sum(m["_myShots"] for m in away_last5) / a_count, 1)
     home_sot_avg = round(sum(m["_mySoT"] for m in home_last5) / h_count, 1)
     away_sot_avg = round(sum(m["_mySoT"] for m in away_last5) / a_count, 1)
+    home_goals_avg = round(sum(m["_myGoals"] for m in home_last5) / h_count, 2)
+    away_goals_avg = round(sum(m["_myGoals"] for m in away_last5) / a_count, 2)
+    home_corners_avg = round(sum(m.get("_myCorners", 5) for m in home_last5) / h_count, 1)
+    away_corners_avg = round(sum(m.get("_myCorners", 4) for m in away_last5) / a_count, 1)
+    home_cards_avg = round(sum(m.get("_myCards", 2) for m in home_last5) / h_count, 1)
+    away_cards_avg = round(sum(m.get("_myCards", 2) for m in away_last5) / a_count, 1)
 
-    # Agregar jugadores y porteros CON DESGLOSE PARTIDO POR PARTIDO (matchLogs)
     agg_players, agg_gks = {}, {}
 
     def process_team_history(match_list, target_id, team_short, is_home_team):
@@ -538,21 +605,19 @@ async def get_match_deep_stats(league_slug: str, home_id: str, away_id: str, hom
     process_team_history(home_last5, home_id, home_abbr, True)
     process_team_history(away_last5, away_id, away_abbr, False)
 
-    # Análisis Táctico Minucioso (Local vs Visitante + Liga)
     home_tactics = analyze_team_tactical_style(home_last5, home_abbr, is_home=True)
     away_tactics = analyze_team_tactical_style(away_last5, away_abbr, is_home=False)
 
-    # Definir veredicto táctico del partido
     if home_tactics["parkTheBusRisk"] or away_tactics["parkTheBusRisk"]:
         match_script = (
             f"⚠️ Partido de Cerrojo Táctico: Uno de los equipos suele anotar 1 gol y encerrarse "
             f"(Over 2.5 solo en {over25}%). Se recomienda priorizar Tiros al Arco de jugador (1.0+), "
-            f"Atajadas de Portero o Goles ↑ 0.5 / ↑ 1.5 sobre líneas altas de goles."
+            f"Atajadas de Portero o Goles ↑ 0.5 / ↑ 1.5."
         )
     elif over25 >= 65 or home_tactics["isScoringMachine"] or away_tactics["isScoringMachine"]:
         match_script = (
             f"🔥 Partido Abierto de Ida y Vuelta: {over25}% de cumplimiento en +2.5 goles y alto volumen de llegadas "
-            f"({home_sot_avg} vs {away_sot_avg} tiros al arco). Escenario ideal para Goles ↑ 1.5 / ↑ 2.5 y Tiradores Titulares."
+            f"({home_sot_avg} vs {away_sot_avg} tiros al arco). Ideal para Goles ↑ 1.5 / ↑ 2.5 y Tiradores Titulares."
         )
     else:
         match_script = (
@@ -573,15 +638,14 @@ async def get_match_deep_stats(league_slug: str, home_id: str, away_id: str, hom
         avg_sot = round(sh["sot"] / gms, 1)
         is_rot = sh["subIns"] >= 2 or sh["starts"] < (gms / 2)
 
-        # Cuántos de los últimos 5 partidos cumplió al menos 1 tiro al arco
         games_with_sot = sum(1 for log in sh["matchLogs"] if log["sot"] >= 1)
         real_sot_hit_rate = round((games_with_sot / gms) * 100)
 
-        venue_factor = "Juega en CASA (Local)" if sh["isHome"] else "Juega de VISITANTE"
+        venue_factor = "LOCAL" if sh["isHome"] else "VISITANTE"
         rot_note = (
-            f"⚠️ ALERTA ROTACIÓN ({venue_factor}): Entró de suplente en {sh['subIns']} de sus últimos {gms} juegos."
+            f"⚠️ Rotación ({venue_factor}): Suplente en {sh['subIns']}/{gms} juegos."
             if is_rot
-            else f"✅ Titular en {sh['starts']}/{gms} juegos • {venue_factor} • Cumplió 1+ tiro al arco en {games_with_sot}/{gms} partidos."
+            else f"✅ Titular {sh['starts']}/{gms} • {venue_factor} • 1+ al arco en {games_with_sot}/{gms} juegos."
         )
 
         key_players_list.append({
@@ -626,6 +690,7 @@ async def get_match_deep_stats(league_slug: str, home_id: str, away_id: str, hom
 
     return {
         "ok": True,
+        "confirmedLineup": confirmed_lineup,
         "recentMatches": {"home": home_last5, "away": away_last5},
         "tacticalAnalysis": {
             "home": home_tactics,
@@ -637,16 +702,21 @@ async def get_match_deep_stats(league_slug: str, home_id: str, away_id: str, hom
             "over15Goals": over15,
             "over25Goals": over25,
             "btts": btts,
+            "homeGoalsAvg": home_goals_avg,
+            "awayGoalsAvg": away_goals_avg,
             "homeShotsAvg": home_shots_avg,
             "awayShotsAvg": away_shots_avg,
             "homeSoTAvg": home_sot_avg,
             "awaySoTAvg": away_sot_avg,
-            "cornersAvg": 9.8
+            "homeCornersAvg": home_corners_avg,
+            "awayCornersAvg": away_corners_avg,
+            "homeCardsAvg": home_cards_avg,
+            "awayCardsAvg": away_cards_avg,
+            "cornersAvg": round(home_corners_avg + away_corners_avg, 1)
         },
         "keyPlayers": key_players_list,
         "goalkeepers": goalkeepers_list
     }
-
 
 async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient, league_id: str, date_yyyymmdd: str):
     league_info = LIVE_LEAGUES_MAP.get(league_id)

@@ -1,5 +1,11 @@
 // src/data/leaguesData.js
 
+export const FAVORITE_TEAMS = [
+  { id: 'BAR', name: 'FC Barcelona', league: 'LALIGA' },
+  { id: 'RMA', name: 'Real Madrid', league: 'LALIGA' },
+  // Agrega aquí los demás equipos que quieras fijar por defecto
+];
+
 export const LEAGUES_CATALOG = [
   {
     id: 'ALL',

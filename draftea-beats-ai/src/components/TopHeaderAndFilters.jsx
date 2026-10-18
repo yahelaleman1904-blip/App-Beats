@@ -48,7 +48,7 @@ export default function TopHeaderAndFilters({
   const isHistoryView = activeTab === 'history';
 
   return (
-    <header className="sticky top-0 z-30 bg-[#0b0d13]/95 backdrop-blur-xl border-b border-gray-800/80 pb-2.5">
+    <header className="relative z-30 bg-[#0b0d13] border-b border-gray-800/80">
       <div className="max-w-md sm:max-w-3xl mx-auto px-3.5 pt-3">
         
         {/* BARRA SUPERIOR (Siempre visible pero sin dinero) */}

@@ -6,9 +6,17 @@ import StatsExplorerView from './components/StatsExplorerView';
 import BeatsBuilderView from './components/BeatsBuilderView';
 import HistoryVaultView from './components/HistoryVaultView';
 import { INITIAL_HISTORY_TICKETS, INITIAL_LEARNING_LOGS } from './data/historyData';
-import { FAVORITE_TEAMS } from './data/leaguesData';
 import { purgeExpiredMatchesCache } from './utils/cacheCleaner';
 import { API_BASE_URL } from './utils/apiConfig';
+
+const PINNED_CLUB_RULES = {
+  BAR: { keyword: 'barcelona', leagues: ['LALIGA', 'UCL', 'UEL'] },
+  RMA: { keyword: 'real madrid', leagues: ['LALIGA', 'UCL', 'UEL'] },
+  BET: { keyword: 'betis', leagues: ['LALIGA', 'UCL', 'UEL'] },
+  DOR: { keyword: 'dortmund', leagues: ['BUNDESLIGA', 'UCL', 'UEL'] },
+  MCI: { keyword: 'manchester city', leagues: ['PREMIER', 'FA_CUP', 'UCL'] },
+  CAZ: { keyword: 'cruz azul', leagues: ['LIGA_MX'] }
+};
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('stats');
@@ -19,20 +27,29 @@ export default function App() {
 
   const [liveMatches, setLiveMatches] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isVerifying, setIsVerifying] = useState(false);
 
   const [deepDataMap, setDeepDataMap] = useState({});
   const [loadingDeepId, setLoadingDeepId] = useState(null);
 
+  // Nueva llave v2_real para arrancar sin los tickets de adorno pre-cargados
   const [savedTickets, setSavedTickets] = useState(() => {
     try {
-      const saved = localStorage.getItem('draftea_ai_tickets_v1');
+      const saved = localStorage.getItem('draftea_ai_tickets_v2_real');
       return saved ? JSON.parse(saved) : INITIAL_HISTORY_TICKETS;
     } catch {
       return INITIAL_HISTORY_TICKETS;
     }
   });
 
-  const [learningLogs, setLearningLogs] = useState(INITIAL_LEARNING_LOGS);
+  const [learningLogs, setLearningLogs] = useState(() => {
+    try {
+      const savedLogs = localStorage.getItem('draftea_ai_learning_v2');
+      return savedLogs ? JSON.parse(savedLogs) : INITIAL_LEARNING_LOGS;
+    } catch {
+      return INITIAL_LEARNING_LOGS;
+    }
+  });
 
   useEffect(() => {
     purgeExpiredMatchesCache();
@@ -84,11 +101,46 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('draftea_ai_tickets_v1', JSON.stringify(savedTickets));
+      localStorage.setItem('draftea_ai_tickets_v2_real', JSON.stringify(savedTickets));
     } catch {
       // Ignorar
     }
   }, [savedTickets]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('draftea_ai_learning_v2', JSON.stringify(learningLogs));
+    } catch {
+      // Ignorar
+    }
+  }, [learningLogs]);
+
+  // Auto-Verificador de Beats contra ESPN
+  const handleAutoVerifyTickets = useCallback(async () => {
+    if (savedTickets.length === 0) return;
+    setIsVerifying(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/verify-tickets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tickets: savedTickets,
+          learningLogs
+        })
+      });
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.tickets)) {
+        setSavedTickets(data.tickets);
+        if (Array.isArray(data.learningLogs)) {
+          setLearningLogs(data.learningLogs);
+        }
+      }
+    } catch (err) {
+      console.error('Error auto-verificando tickets:', err);
+    } finally {
+      setIsVerifying(false);
+    }
+  }, [savedTickets, learningLogs]);
 
   const globalAccuracy = useMemo(() => {
     const settledLegs = savedTickets.reduce(
@@ -99,20 +151,21 @@ export default function App() {
       (acc, t) => acc + t.legs.filter((l) => l.hit === true).length,
       0
     );
-    return settledLegs > 0 ? ((hitLegs / settledLegs) * 100).toFixed(1) : '91.9';
+    return settledLegs > 0 ? ((hitLegs / settledLegs) * 100).toFixed(1) : 'En espera';
   }, [savedTickets]);
 
   const isMatchPinned = useCallback(
     (match) => {
       if (!pinnedTeams.length) return false;
-      const activeFavs = FAVORITE_TEAMS.filter((f) => pinnedTeams.includes(f.id));
-      return activeFavs.some((fav) => {
-        const cleanFav = fav.name.toLowerCase().replace('fc ', '').replace('club ', '').trim();
-        const homeName = match.homeTeam.name.toLowerCase();
-        const awayName = match.awayTeam.name.toLowerCase();
-        const nameMatches = homeName.includes(cleanFav) || awayName.includes(cleanFav);
-        const allowedLeagues = [fav.league, 'UCL', 'UEL', 'FA_CUP', 'LIBERTADORES', 'SUDAMERICANA'];
-        return nameMatches && allowedLeagues.includes(match.leagueId);
+      const homeName = match.homeTeam.name.toLowerCase();
+      const awayName = match.awayTeam.name.toLowerCase();
+
+      return pinnedTeams.some((pinId) => {
+        const rule = PINNED_CLUB_RULES[pinId];
+        if (!rule) return false;
+        const nameMatch =
+          homeName.includes(rule.keyword) || awayName.includes(rule.keyword);
+        return nameMatch && rule.leagues.includes(match.leagueId);
       });
     },
     [pinnedTeams]
@@ -142,6 +195,10 @@ export default function App() {
     setSavedTickets((p) => [newTicket, ...p]);
   };
 
+  const handleAddCustomLearningRule = (newRule) => {
+    setLearningLogs((prev) => [newRule, ...prev]);
+  };
+
   const handleToggleLegResult = (ticketId, legId) => {
     setSavedTickets((prev) =>
       prev.map((tk) => {
@@ -154,32 +211,10 @@ export default function App() {
             if (leg.hit === null || leg.hit === undefined) nextHit = true;
             else if (leg.hit === true) nextHit = false;
             else nextHit = null;
-
-            if (nextHit === false) {
-              setLearningLogs((oldLogs) => [
-                {
-                  id: `learn-${Date.now()}`,
-                  tag: `AJUSTE EN ${leg.market}`,
-                  source: `Aprendido de: ${leg.fullMatchTitle} (${leg.selection})`,
-                  rule: `Se ajustó la ponderación táctica en "${leg.selection}" para priorizar mercados con mayor colchón en el próximo Beat.`
-                },
-                ...oldLogs.slice(0, 6)
-              ]);
-            }
             return { ...leg, hit: nextHit };
           })
         };
       })
-    );
-  };
-
-  const handleMarkAllTicketResult = (ticketId, hitStatus) => {
-    setSavedTickets((p) =>
-      p.map((tk) =>
-        tk.id === ticketId
-          ? { ...tk, legs: tk.legs.map((l) => ({ ...l, hit: hitStatus })) }
-          : tk
-      )
     );
   };
 
@@ -251,15 +286,18 @@ export default function App() {
                   setSelectedDates(d);
                 }}
                 onSaveTicketToHistory={handleSaveTicketToHistory}
+                learningLogs={learningLogs}
               />
             )}
             {activeTab === 'history' && (
               <HistoryVaultView
                 tickets={savedTickets}
                 onToggleLegResult={handleToggleLegResult}
-                onMarkAllTicketResult={handleMarkAllTicketResult}
                 onToggleArchiveTicket={handleToggleArchiveTicket}
+                onAutoVerifyTickets={handleAutoVerifyTickets}
+                isVerifying={isVerifying}
                 learningLogs={learningLogs}
+                onAddCustomLearningRule={handleAddCustomLearningRule}
               />
             )}
           </>

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import httpx
+import re
 
 app = FastAPI(
     title="Draftea Beats AI - Motor Táctico Profundo & Historial L5",
@@ -912,6 +913,189 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
         "timezone": "America/Mexico_City (UTC-6)",
         "total_matches": len(all_matches),
         "matches": all_matches
+    }
+
+
+@app.post("/api/verify-tickets")
+async def auto_verify_tickets(payload: dict):
+    """
+    PUNTO 4: Auto-Verificador Inteligente de Beats.
+    Revisa los tickets EN CURSO contra los resultados oficiales de ESPN sin que el usuario
+    tenga que calificarlos manualmente, devuelve el valor real obtenido (para la barra estilo Draftea)
+    y genera reglas de aprendizaje automático cuando detecta un fallo.
+    """
+    tickets = payload.get("tickets", [])
+    learning_logs = payload.get("learningLogs", [])
+    updated_any = False
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        for tk in tickets:
+            for leg in tk.get("legs", []):
+                # Solo verificar selecciones que sigan pendientes o de partidos que queremos actualizar
+                match_id = str(leg.get("matchId", ""))
+                league_slug = leg.get("leagueSlug") or "esp.1"
+                if not match_id or not match_id.isdigit():
+                    continue
+
+                url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={match_id}"
+                try:
+                    resp = await client.get(url, headers=HEADERS)
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+
+                    header_comp = data.get("header", {}).get("competitions", [{}])[0]
+                    st_type = header_comp.get("status", {}).get("type", {})
+                    state = st_type.get("state", "").lower()  # 'pre', 'in', 'post'
+                    completed = st_type.get("completed", False)
+
+                    competitors = header_comp.get("competitors", [])
+                    if len(competitors) < 2:
+                        continue
+
+                    home_c = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+                    away_c = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+                    home_score = safe_int(home_c.get("score", 0))
+                    away_score = safe_int(away_c.get("score", 0))
+                    home_name = home_c.get("team", {}).get("displayName", "")
+                    away_name = away_c.get("team", {}).get("displayName", "")
+                    home_abbr = home_c.get("team", {}).get("abbreviation", "")
+                    away_abbr = away_c.get("team", {}).get("abbreviation", "")
+
+                    leg["liveScore"] = {
+                        "homeScore": home_score,
+                        "awayScore": away_score,
+                        "state": state,
+                        "statusText": "Final" if (completed or state == "post") else st_type.get("shortDetail", "En Vivo")
+                    }
+
+                    # Solo liquidar definitivamente cuando el partido haya finalizado ('post')
+                    if not (completed or state == "post"):
+                        continue
+
+                    # Extraer estadísticas de equipos
+                    box_teams = data.get("boxscore", {}).get("teams", [])
+                    def get_team_stat(idx, keys):
+                        if idx >= len(box_teams):
+                            return 0
+                        for st in box_teams[idx].get("statistics", []):
+                            if st.get("name") in keys:
+                                return safe_int(st.get("displayValue", 0))
+                        return 0
+
+                    home_shots = get_team_stat(0, ["totalShots", "shotsSummary"])
+                    away_shots = get_team_stat(1, ["totalShots", "shotsSummary"])
+                    home_sot = get_team_stat(0, ["shotsOnTarget", "onTargetScoringAttempts"])
+                    away_sot = get_team_stat(1, ["shotsOnTarget", "onTargetScoringAttempts"])
+                    total_corners = get_team_stat(0, ["wonCorners", "cornerKicks"]) + get_team_stat(1, ["wonCorners", "cornerKicks"])
+                    total_cards = (
+                        get_team_stat(0, ["yellowCards"]) + get_team_stat(1, ["yellowCards"]) +
+                        get_team_stat(0, ["redCards"]) + get_team_stat(1, ["redCards"])
+                    )
+
+                    # Extraer estadísticas individuales de jugadores y Banca+
+                    rosters = data.get("rosters", [])
+                    all_roster_players = []
+                    for r_obj in rosters:
+                        for p in r_obj.get("roster", []):
+                            ath = p.get("athlete", {})
+                            st_map = {s.get("name"): safe_float(s.get("value", 0)) for s in p.get("stats", [])}
+                            all_roster_players.append({
+                                "name": ath.get("displayName", ""),
+                                "shortName": ath.get("shortName", ""),
+                                "starter": bool(p.get("starter", False)),
+                                "subbedIn": bool(p.get("subbedIn", False)),
+                                "shots": int(st_map.get("totalShots", 0)),
+                                "sot": int(st_map.get("shotsOnTarget", 0)),
+                                "goals": int(st_map.get("totalGoals", 0)),
+                                "saves": int(st_map.get("saves", 0)),
+                            })
+
+                    market = leg.get("market", "").upper()
+                    selection = leg.get("selection", "")
+                    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", selection)]
+                    target_line = nums[-1] if nums else 1.0
+
+                    actual_val = 0
+                    hit_result = False
+
+                    if "GOLES TOTALES" in market or "GOLES 1RA" in market:
+                        actual_val = home_score + away_score
+                        hit_result = actual_val > target_line
+                    elif "AMBOS EQUIPOS ANOTAN" in market:
+                        actual_val = 2 if (home_score > 0 and away_score > 0) else 0
+                        target_line = 1
+                        hit_result = home_score > 0 and away_score > 0
+                    elif "DOBLE OPORTUNIDAD" in market:
+                        actual_val = home_score
+                        target_line = away_score
+                        hit_result = home_score >= away_score
+                    elif "GANADOR" in market or "RESULTADO" in market:
+                        is_home_pick = home_name.lower() in selection.lower() or home_abbr.lower() in selection.lower()
+                        actual_val = home_score if is_home_pick else away_score
+                        opp_val = away_score if is_home_pick else home_score
+                        target_line = opp_val + 1
+                        hit_result = actual_val > opp_val
+                    elif "CÓRNERS" in market:
+                        actual_val = total_corners
+                        hit_result = actual_val > target_line
+                    elif "TARJETAS" in market:
+                        actual_val = total_cards
+                        hit_result = actual_val > target_line
+                    elif "TIROS AL ARCO EQUIPO" in market:
+                        is_home_pick = home_name.lower() in selection.lower() or home_abbr.lower() in selection.lower()
+                        actual_val = home_sot if is_home_pick else away_sot
+                        hit_result = actual_val >= target_line
+                    elif "TOTAL DE TIROS EQUIPO" in market:
+                        is_home_pick = home_name.lower() in selection.lower() or home_abbr.lower() in selection.lower()
+                        actual_val = home_shots if is_home_pick else away_shots
+                        hit_result = actual_val >= target_line
+                    elif "JUGADOR" in market or "VISITANTE" in market or "GOLEADOR" in market or "ATAJADAS" in market:
+                        # Buscar al jugador en el roster oficial
+                        player_name_clean = selection.split("(")[0].strip().lower()
+                        matched_p = next(
+                            (
+                                rp for rp in all_roster_players
+                                if player_name_clean in rp["name"].lower() or rp["name"].lower() in player_name_clean
+                            ),
+                            None
+                        )
+                        if matched_p:
+                            if not matched_p["starter"]:
+                                leg["notStarterBadge"] = "NO FUE TITULAR"
+                            if "ATAJADAS" in market:
+                                actual_val = matched_p["saves"]
+                            elif "GOLEADOR" in market:
+                                actual_val = matched_p["goals"]
+                                target_line = 1
+                            elif "ARCO" in market:
+                                actual_val = matched_p["sot"]
+                            else:
+                                actual_val = matched_p["shots"]
+                            hit_result = actual_val >= target_line
+
+                    prev_hit = leg.get("hit")
+                    leg["actualValue"] = actual_val
+                    leg["targetValue"] = target_line
+                    leg["hit"] = bool(hit_result)
+                    updated_any = True
+
+                    # Si falló por primera vez, generar regla automática para que el algoritmo aprenda solo
+                    if prev_hit is None and not hit_result:
+                        learning_logs.insert(0, {
+                            "id": f"auto-learn-{match_id}-{len(learning_logs)}",
+                            "tag": f"AUTO-CORRECCIÓN EN {market}",
+                            "source": f"Verificado en {leg.get('fullMatchTitle')}: {selection} (Hizo {actual_val})",
+                            "rule": f"El algoritmo detectó que '{selection}' se quedó en {actual_val} (meta {target_line}). Se reduce el techo de {market} para exigir mayor consistencia partido por partido."
+                        })
+                except Exception:
+                    continue
+
+    return {
+        "ok": True,
+        "updated": updated_any,
+        "tickets": tickets,
+        "learningLogs": learning_logs[:12]
     }
 
 

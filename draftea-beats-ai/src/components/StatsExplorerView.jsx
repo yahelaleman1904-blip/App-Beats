@@ -5,72 +5,23 @@ import {
   ChevronUp,
   Pin,
   Sparkles,
-  AlertTriangle,
-  CheckCircle2,
-  ArrowDownLeft,
-  ArrowUpRight,
   History,
-  ShieldAlert,
   Shield,
   Target,
   Loader2,
   Brain,
   Users,
   BarChart3,
+  Table2,
   Clock,
   X
 } from 'lucide-react';
 import { triggerHaptic } from '../utils/haptics';
-
-function PitchPlayerNode({ player }) {
-  const getRatingColor = (r) => {
-    if (r >= 8.0) return 'bg-emerald-500 text-black';
-    if (r >= 7.0) return 'bg-lime-500 text-black';
-    if (r >= 6.5) return 'bg-amber-400 text-black';
-    return 'bg-orange-500 text-white';
-  };
-
-  return (
-    <div className="flex flex-col items-center relative w-16 sm:w-20">
-      <div className="relative w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#182232] border-2 border-white/85 flex items-center justify-center shadow-md">
-        <span className="text-[10px] font-black text-white">{player.num}</span>
-
-        {player.subOut && (
-          <span
-            title="Salió de cambio"
-            className="absolute -top-1 -left-1 w-4 h-4 rounded-full bg-red-600 text-white flex items-center justify-center shadow"
-          >
-            <ArrowDownLeft className="w-2.5 h-2.5 stroke-[3]" />
-          </span>
-        )}
-
-        {player.goals && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white text-black text-[9px] font-black flex items-center justify-center shadow">
-            ⚽{player.goals > 1 ? player.goals : ''}
-          </span>
-        )}
-
-        {player.assists && !player.goals && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-sky-400 text-black text-[8px] font-black flex items-center justify-center shadow">
-            👟
-          </span>
-        )}
-
-        <span
-          className={`absolute -bottom-1.5 px-1.5 py-0.2 rounded text-[9px] font-black shadow ${getRatingColor(
-            player.rating || 7.0
-          )}`}
-        >
-          {(player.rating || 7.0).toFixed(1)}
-        </span>
-      </div>
-
-      <span className="mt-2 text-[9px] sm:text-[10px] font-bold text-white text-center leading-tight drop-shadow truncate max-w-full">
-        {player.num} {player.name}
-      </span>
-    </div>
-  );
-}
+import {
+  InteractivePitchNode,
+  PlayerPitchDetailModal,
+  SquadConvocadosTable
+} from './InteractivePitchAndTable';
 
 export default function StatsExplorerView({
   matches,
@@ -80,12 +31,14 @@ export default function StatsExplorerView({
   onEnsureDeepStats
 }) {
   const [expandedMatchId, setExpandedMatchId] = useState(null);
-  // Pestaña activa dentro del partido desplegado: 'general' | 'lineups' | 'stats' | 'last5'
+  // Botones internos: 'general' | 'lineups' | 'squad' | 'stats' | 'last5'
   const [activeSubTab, setActiveSubTab] = useState('general');
   const [selectedPastMatch, setSelectedPastMatch] = useState(null);
   const [expandedGkKey, setExpandedGkKey] = useState(null);
   const [expandedPlayerId, setExpandedPlayerId] = useState(null);
-  const [playerTeamFilter, setPlayerTeamFilter] = useState('ALL'); // 'ALL' | 'HOME' | 'AWAY'
+  const [playerTeamFilter, setPlayerTeamFilter] = useState('ALL');
+  // Jugador seleccionado al tocar su círculo en la cancha
+  const [modalPlayer, setModalPlayer] = useState(null);
 
   const handleToggleMatch = async (match) => {
     triggerHaptic('light');
@@ -121,7 +74,7 @@ export default function StatsExplorerView({
             📊 Explorador de Enfrentamientos Vigentes ({matches.length})
           </h2>
           <p className="text-[11px] text-gray-400">
-            Toca cualquier partido para navegar por sus botones de Información General, Alineaciones, Estadísticas y Últimos 5.
+            Toca un partido para ver Información General, Alineaciones Interactivas, Tabla de Convocados y Últimos 5 Multi-Torneo.
           </p>
         </div>
       </div>
@@ -146,6 +99,21 @@ export default function StatsExplorerView({
           if (playerTeamFilter === 'AWAY') return p.team === match.awayTeam.short;
           return true;
         });
+
+        // Para la tabla de convocados: usa la del partido pasado seleccionado o la del último partido de ambos clubes
+        const activeSquadTable =
+          selectedPastMatch?.squadTable ||
+          confirmedLineup?.squadTable ||
+          (recentHome[0]?.squadTable && recentAway[0]?.squadTable
+            ? {
+                home: recentHome[0].squadTable.home,
+                away: recentAway[0].squadTable.home,
+                all: [
+                  ...(recentHome[0].squadTable.home || []),
+                  ...(recentAway[0].squadTable.home || [])
+                ].sort((a, b) => b.rating - a.rating)
+              }
+            : recentHome[0]?.squadTable || null);
 
         return (
           <div
@@ -240,14 +208,14 @@ export default function StatsExplorerView({
               </div>
             </div>
 
-            {/* CONTENIDO DESPLEGABLE CON BOTONES AGRUPADOS (ESTILO IMAGEN 6) */}
+            {/* CAJÓN DESPLEGABLE CON LOS 5 BOTONES DE NAVEGACIÓN */}
             {isExpanded && (
               <div className="border-t border-gray-800 bg-[#0e121b] p-3.5 space-y-4">
-                {/* BARRA DE PÍLDORAS / BOTONES DE NAVEGACIÓN INTERNA */}
                 <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
                   {[
                     { id: 'general', label: 'Información general', icon: Brain },
                     { id: 'lineups', label: 'Alineaciones', icon: Users },
+                    { id: 'squad', label: 'Convocados (Tabla)', icon: Table2 },
                     { id: 'stats', label: 'Estadísticas', icon: BarChart3 },
                     { id: 'last5', label: 'Últimos 5 partidos', icon: History }
                   ].map((tab) => {
@@ -277,17 +245,14 @@ export default function StatsExplorerView({
                   <div className="py-10 flex flex-col items-center justify-center gap-2 text-center">
                     <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
                     <p className="text-xs font-extrabold text-white">
-                      Cargando estudio táctico, tiradores reales y últimos 5 partidos...
+                      Descargando últimos 5 juegos de Liga/Champions/Copa, convocados y tiradores reales...
                     </p>
                   </div>
                 ) : (
                   <>
-                    {/* =========================================================
-                        BOTÓN 1: INFORMACIÓN GENERAL (OPINIÓN IA + JUGADORES Y PORTEROS LIMPIOS)
-                       ========================================================= */}
+                    {/* BOTÓN 1: INFORMACIÓN GENERAL */}
                     {activeSubTab === 'general' && (
                       <div className="space-y-4">
-                        {/* Opinión Táctica de la IA */}
                         {tactical && (
                           <div className="bg-[#141824] border border-indigo-500/30 rounded-2xl p-3.5 space-y-3">
                             <div className="flex items-center justify-between">
@@ -331,14 +296,12 @@ export default function StatsExplorerView({
                           </div>
                         )}
 
-                        {/* PUNTO 7: JUGADORES CLAVE EN FORMATO ELEGANTE, LIMPIO Y DIGERIBLE */}
                         <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3.5 space-y-3">
                           <div className="flex items-center justify-between flex-wrap gap-2">
                             <h4 className="text-xs font-extrabold text-white flex items-center gap-1.5">
                               <Target className="w-4 h-4 text-emerald-400" /> Jugadores Clave y Tiros al Arco
                             </h4>
 
-                            {/* Selector por equipo estilo pestañas limpias */}
                             <div className="flex items-center gap-1 bg-[#0b0d13] p-1 rounded-xl border border-gray-800 text-[10px] font-bold">
                               <button
                                 onClick={() => setPlayerTeamFilter('ALL')}
@@ -408,7 +371,6 @@ export default function StatsExplorerView({
                                         </span>
                                       </div>
 
-                                      {/* Píldoras limpias de métricas */}
                                       <div className="flex items-center gap-3 text-[11px] text-gray-400 mt-1">
                                         <span>
                                           Al Arco/J: <strong className="text-emerald-400">{player.avgSoT}</strong>
@@ -448,10 +410,15 @@ export default function StatsExplorerView({
                                           key={lIdx}
                                           className="flex items-center justify-between text-[11px] bg-[#141824] px-2.5 py-1.5 rounded-lg"
                                         >
-                                          <span className="font-bold text-gray-200">
-                                            {log.score} <span className="text-gray-500">({log.date})</span>
-                                          </span>
-                                          <div className="flex items-center gap-2.5">
+                                          <div className="truncate pr-2">
+                                            <span className="font-bold text-gray-200">
+                                              {log.score}
+                                            </span>
+                                            <span className="text-[10px] text-purple-300 ml-1.5">
+                                              ({log.competition || log.date})
+                                            </span>
+                                          </div>
+                                          <div className="flex items-center gap-2.5 shrink-0">
                                             <span className="text-gray-300">
                                               Tiros: <strong className="text-white">{log.shots}</strong>
                                             </span>
@@ -474,7 +441,6 @@ export default function StatsExplorerView({
                           </div>
                         </div>
 
-                        {/* PORTEROS LIMPIOS Y DESPLEGABLES */}
                         {goalkeepers.length > 0 && (
                           <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3.5 space-y-2.5">
                             <h4 className="text-xs font-extrabold text-sky-400 flex items-center gap-1.5">
@@ -519,10 +485,10 @@ export default function StatsExplorerView({
                                             key={lIdx}
                                             className="flex justify-between text-[11px] bg-[#141824] px-2 py-1 rounded"
                                           >
-                                            <span className="text-gray-200 font-semibold">
-                                              {log.score} ({log.date})
+                                            <span className="text-gray-200 font-semibold truncate">
+                                              {log.score} • <span className="text-purple-300">{log.competition || log.date}</span>
                                             </span>
-                                            <span className="text-sky-400 font-black">
+                                            <span className="text-sky-400 font-black shrink-0 ml-2">
                                               🧤 {log.saves} atajadas
                                             </span>
                                           </div>
@@ -538,16 +504,14 @@ export default function StatsExplorerView({
                       </div>
                     )}
 
-                    {/* =========================================================
-                        BOTÓN 2: ALINEACIONES (CONFIRMADAS O AVISO DE NO CONFIRMADAS)
-                       ========================================================= */}
+                    {/* BOTÓN 2: ALINEACIONES INTERACTIVAS */}
                     {activeSubTab === 'lineups' && (
                       <div className="bg-[#141824] border border-gray-800 rounded-2xl p-4">
                         {confirmedLineup?.confirmed ? (
                           <div className="space-y-3">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs font-extrabold text-emerald-400 flex items-center gap-1.5">
-                                <CheckCircle2 className="w-4 h-4" /> Alineaciones Oficiales Confirmadas
+                              <span className="text-xs font-extrabold text-emerald-400">
+                                ✅ Alineaciones Oficiales Confirmadas (Toca un jugador para ver detalle)
                               </span>
                               <span className="text-[10px] text-gray-400">
                                 {confirmedLineup.homeFormation} vs {confirmedLineup.awayFormation}
@@ -559,7 +523,11 @@ export default function StatsExplorerView({
                                 {confirmedLineup.homeRows.map((row, rIdx) => (
                                   <div key={rIdx} className="flex items-center justify-around gap-1">
                                     {row.map((player, pIdx) => (
-                                      <PitchPlayerNode key={pIdx} player={player} />
+                                      <InteractivePitchNode
+                                        key={pIdx}
+                                        player={player}
+                                        onSelectPlayer={setModalPlayer}
+                                      />
                                     ))}
                                   </div>
                                 ))}
@@ -568,7 +536,11 @@ export default function StatsExplorerView({
                                 {confirmedLineup.awayRows.map((row, rIdx) => (
                                   <div key={rIdx} className="flex items-center justify-around gap-1">
                                     {row.map((player, pIdx) => (
-                                      <PitchPlayerNode key={pIdx} player={player} />
+                                      <InteractivePitchNode
+                                        key={pIdx}
+                                        player={player}
+                                        onSelectPlayer={setModalPlayer}
+                                      />
                                     ))}
                                   </div>
                                 ))}
@@ -584,22 +556,36 @@ export default function StatsExplorerView({
                               Alineaciones aún no confirmadas para este partido
                             </h4>
                             <p className="text-xs text-gray-400 max-w-md mx-auto leading-relaxed">
-                              Los clubes publican el 11 titular oficial aproximadamente <strong>60 minutos antes del silbatazo inicial</strong> ({match.date} • {match.time}).
+                              Los clubes publican el 11 titular oficial aproximadamente <strong>60 minutos antes del inicio</strong> ({match.date} • {match.time}).
                             </p>
                             <p className="text-[11px] text-purple-300 font-semibold pt-1">
-                              💡 Tip: Toca el botón &quot;Últimos 5 partidos&quot; arriba para ver las alineaciones reales que usaron ambos equipos en sus juegos anteriores.
+                              💡 Toca el botón &quot;Últimos 5 partidos&quot; arriba para abrir la cancha interactiva de sus juegos previos y tocar a cada jugador.
                             </p>
                           </div>
                         )}
                       </div>
                     )}
 
-                    {/* =========================================================
-                        BOTÓN 3: ESTADÍSTICAS GENERALES DIVIDIDAS POR EQUIPO
-                       ========================================================= */}
+                    {/* BOTÓN 3: TABLA DE CONVOCADOS ESTILO IMAGEN 1 */}
+                    {activeSubTab === 'squad' && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-[11px] font-bold text-gray-300">
+                            📋 Rendimiento y Calificación de la Plantilla Convocada (Último Partido Oficial):
+                          </span>
+                        </div>
+                        <SquadConvocadosTable
+                          squadTable={activeSquadTable}
+                          homeName={match.homeTeam.name}
+                          awayName={match.awayTeam.name}
+                          onSelectPlayer={setModalPlayer}
+                        />
+                      </div>
+                    )}
+
+                    {/* BOTÓN 4: ESTADÍSTICAS GENERALES */}
                     {activeSubTab === 'stats' && (
                       <div className="space-y-4">
-                        {/* Probabilidades de Goles */}
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                           {[
                             { label: 'Goles ↑ 0.5', val: statsL10.over05Goals },
@@ -625,12 +611,11 @@ export default function StatsExplorerView({
                           ))}
                         </div>
 
-                        {/* Comparativa Cara a Cara por Equipo */}
                         <div className="bg-[#141824] border border-gray-800 rounded-2xl p-4 space-y-3">
                           <div className="flex items-center justify-between text-xs font-extrabold text-white border-b border-gray-800 pb-2">
                             <span className="text-emerald-400">{match.homeTeam.name}</span>
                             <span className="text-[10px] text-gray-400 uppercase">
-                              Promedios por Partido (L5)
+                              Promedios por Partido (Últimos 5 Multi-Torneo)
                             </span>
                             <span className="text-sky-400">{match.awayTeam.name}</span>
                           </div>
@@ -684,9 +669,7 @@ export default function StatsExplorerView({
                       </div>
                     )}
 
-                    {/* =========================================================
-                        BOTÓN 4: ÚLTIMOS 5 PARTIDOS DE CADA EQUIPO Y RADIOGRAFÍA
-                       ========================================================= */}
+                    {/* BOTÓN 5: ÚLTIMOS 5 PARTIDOS MULTI-TORNEO (LIGA / CHAMPIONS / COPA) */}
                     {activeSubTab === 'last5' && (
                       <div className="bg-[#141824] border border-purple-500/30 rounded-2xl p-3.5 space-y-3">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -695,7 +678,7 @@ export default function StatsExplorerView({
                             <div className="flex items-center gap-2 pb-1.5 border-b border-gray-800">
                               <img src={match.homeTeam.logo} alt="" className="w-4 h-4 object-contain" />
                               <span className="text-xs font-extrabold text-white">
-                                Últimos 5 de {match.homeTeam.name}
+                                Últimos 5 de {match.homeTeam.name} (Todos los Torneos)
                               </span>
                             </div>
 
@@ -728,13 +711,18 @@ export default function StatsExplorerView({
                                           </span>{' '}
                                           {pm.awayName}
                                         </p>
-                                        <span className="text-[9px] text-gray-400">
-                                          {pm.date} • {pm.competition}
-                                        </span>
+                                        <div className="flex items-center gap-1.5 mt-0.5">
+                                          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                            {pm.competition}
+                                          </span>
+                                          <span className="text-[9px] text-gray-400">
+                                            {pm.date}
+                                          </span>
+                                        </div>
                                       </div>
                                     </div>
                                     <span className="text-[10px] font-bold text-purple-300 shrink-0 ml-2">
-                                      {isSelected ? 'Abierto ▲' : 'Stats y Cancha ▼'}
+                                      {isSelected ? 'Abierto ▲' : 'Ver Cancha ▼'}
                                     </span>
                                   </button>
                                 );
@@ -747,7 +735,7 @@ export default function StatsExplorerView({
                             <div className="flex items-center gap-2 pb-1.5 border-b border-gray-800">
                               <img src={match.awayTeam.logo} alt="" className="w-4 h-4 object-contain" />
                               <span className="text-xs font-extrabold text-white">
-                                Últimos 5 de {match.awayTeam.name}
+                                Últimos 5 de {match.awayTeam.name} (Todos los Torneos)
                               </span>
                             </div>
 
@@ -780,13 +768,18 @@ export default function StatsExplorerView({
                                           </span>{' '}
                                           {pm.awayName}
                                         </p>
-                                        <span className="text-[9px] text-gray-400">
-                                          {pm.date} • {pm.competition}
-                                        </span>
+                                        <div className="flex items-center gap-1.5 mt-0.5">
+                                          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                            {pm.competition}
+                                          </span>
+                                          <span className="text-[9px] text-gray-400">
+                                            {pm.date}
+                                          </span>
+                                        </div>
                                       </div>
                                     </div>
                                     <span className="text-[10px] font-bold text-purple-300 shrink-0 ml-2">
-                                      {isSelected ? 'Abierto ▲' : 'Stats y Cancha ▼'}
+                                      {isSelected ? 'Abierto ▲' : 'Ver Cancha ▼'}
                                     </span>
                                   </button>
                                 );
@@ -795,7 +788,7 @@ export default function StatsExplorerView({
                           </div>
                         </div>
 
-                        {/* RADIOGRAFÍA DEL PARTIDO PASADO SELECCIONADO */}
+                        {/* RADIOGRAFÍA INTERACTIVA DEL PARTIDO PASADO SELECCIONADO */}
                         {selectedPastMatch && (
                           <div className="mt-3 pt-3 border-t border-purple-500/40 bg-[#0b0d13] rounded-2xl p-3.5 space-y-4">
                             <div className="flex items-center justify-between border-b border-gray-800 pb-2.5">
@@ -840,65 +833,14 @@ export default function StatsExplorerView({
                               ))}
                             </div>
 
-                            {/* PUNTO 4 CORREGIDO: GOLES Y TARJETAS CON EL EQUIPO SIEMPRE VISIBLE */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                              <div className="bg-[#141824] border border-gray-800 rounded-xl p-2.5">
-                                <span className="text-[10px] font-extrabold text-emerald-400 uppercase block mb-1.5">
-                                  ⚽ Goles del Partido
-                                </span>
-                                {selectedPastMatch.scorers?.length > 0 ? (
-                                  <div className="space-y-1.5">
-                                    {selectedPastMatch.scorers.map((sc, i) => (
-                                      <div key={i} className="flex items-center justify-between text-[11px]">
-                                        <div className="flex items-center gap-1.5">
-                                          <span className="font-bold text-white">{sc.player}</span>
-                                          <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300">
-                                            {sc.team || selectedPastMatch.homeName}
-                                          </span>
-                                        </div>
-                                        <span className="font-black text-emerald-400">{sc.min}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="text-[11px] text-gray-500">Sin goles registrados</span>
-                                )}
-                              </div>
-
-                              <div className="bg-[#141824] border border-gray-800 rounded-xl p-2.5">
-                                <span className="text-[10px] font-extrabold text-amber-400 uppercase block mb-1.5">
-                                  🟨🟥 Tarjetas Registradas
-                                </span>
-                                {selectedPastMatch.cards?.length > 0 ? (
-                                  <div className="space-y-1.5">
-                                    {selectedPastMatch.cards.map((cd, i) => (
-                                      <div key={i} className="flex items-center justify-between text-[11px]">
-                                        <div className="flex items-center gap-1.5">
-                                          <span className="font-bold text-white">
-                                            {cd.type === 'red' ? '🟥' : '🟨'} {cd.player}
-                                          </span>
-                                          <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300">
-                                            {cd.team || selectedPastMatch.homeName}
-                                          </span>
-                                        </div>
-                                        <span className="font-black text-amber-300">{cd.min}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="text-[11px] text-gray-500">Sin tarjetas</span>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* CANCHA TÁCTICA USADA EN ESE PARTIDO */}
+                            {/* CANCHA TÁCTICA INTERACTIVA (TOCA UN JUGADOR PARA VER SUS STATS Y CAMBIOS) */}
                             <div className="rounded-2xl overflow-hidden border-2 border-emerald-700/60 bg-gradient-to-b from-[#256343] via-[#2b724e] to-[#256343]">
-                              <div className="bg-black/40 px-3.5 py-2 flex items-center justify-between border-b border-white/15">
+                              <div className="bg-black/45 px-3.5 py-2 flex items-center justify-between border-b border-white/15">
                                 <span className="text-xs font-extrabold text-white">
-                                  🏟️ Alineación Usada ({selectedPastMatch.teamFormation})
+                                  🏟️ Alineación Interactiva ({selectedPastMatch.teamFormation})
                                 </span>
                                 <span className="text-[10px] font-bold text-emerald-300">
-                                  Titulares Reales de ese Partido
+                                  👆 Toca cualquier círculo de jugador para ver sus stats y por quién salió
                                 </span>
                               </div>
 
@@ -906,7 +848,11 @@ export default function StatsExplorerView({
                                 {selectedPastMatch.teamLineupRows?.map((row, rIdx) => (
                                   <div key={rIdx} className="flex items-center justify-around gap-1">
                                     {row.map((player, pIdx) => (
-                                      <PitchPlayerNode key={pIdx} player={player} />
+                                      <InteractivePitchNode
+                                        key={pIdx}
+                                        player={player}
+                                        onSelectPlayer={setModalPlayer}
+                                      />
                                     ))}
                                   </div>
                                 ))}
@@ -916,12 +862,24 @@ export default function StatsExplorerView({
                                 {selectedPastMatch.oppLineupRows?.map((row, rIdx) => (
                                   <div key={rIdx} className="flex items-center justify-around gap-1">
                                     {row.map((player, pIdx) => (
-                                      <PitchPlayerNode key={pIdx} player={player} />
+                                      <InteractivePitchNode
+                                        key={pIdx}
+                                        player={player}
+                                        onSelectPlayer={setModalPlayer}
+                                      />
                                     ))}
                                   </div>
                                 ))}
                               </div>
                             </div>
+
+                            {/* TABLA DE CONVOCADOS DE ESE PARTIDO */}
+                            <SquadConvocadosTable
+                              squadTable={selectedPastMatch.squadTable}
+                              homeName={selectedPastMatch.homeName}
+                              awayName={selectedPastMatch.awayName}
+                              onSelectPlayer={setModalPlayer}
+                            />
                           </div>
                         )}
                       </div>
@@ -933,6 +891,12 @@ export default function StatsExplorerView({
           </div>
         );
       })}
+
+      {/* MODAL FLOTANTE AL DAR CLIC EN UN JUGADOR DE LA CANCHA O DE LA TABLA */}
+      <PlayerPitchDetailModal
+        player={modalPlayer}
+        onClose={() => setModalPlayer(null)}
+      />
     </div>
   );
 }

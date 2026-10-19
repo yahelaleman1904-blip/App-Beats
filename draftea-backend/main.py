@@ -10,8 +10,8 @@ import unicodedata
 import httpx
 
 app = FastAPI(
-    title="Draftea Beats AI - Motor Estadístico 100% Verificado",
-    version="6.0.0"
+    title="Draftea Beats AI - Motor Multi-Torneo, Cancha Interactiva & Buscador",
+    version="7.0.0"
 )
 
 app.add_middleware(
@@ -45,23 +45,51 @@ LIVE_LEAGUES_MAP = {
     "JUPILER_PRO": {"slug": "bel.1", "name": "Jupiler Pro League", "profile": "Abierta • Excelente para Ambos Anotan y +1.5 Goles"},
     "PRIMEIRA_LIGA": {"slug": "por.1", "name": "Liga Portugal", "profile": "Asimétrica • Dominio de Sporting/Porto/Benfica en Tiros y Córners"},
     "LIBERTADORES": {"slug": "conmebol.libertadores", "name": "CONMEBOL Libertadores", "profile": "Intensa / Cerrada • Localía pesada, muchas tarjetas y pocos goles"},
-    "SUDAMERICANA": {"slug": "conmebol.sudamericana", "name": "CONMEBOL Sudamericana", "profile": "Fricción Alta • Partidos definidos por 1 gol y balón parado"},
+    "SUDAMERICANA": {"slug": "conmebol.sudamericana", "profile": "Fricción Alta • Partidos definidos por 1 gol y balón parado", "name": "CONMEBOL Sudamericana"},
     "ARGENTINA": {"slug": "arg.1", "name": "Liga Profesional", "profile": "Defensiva / Fricción • Tendencia a 1-0, tarjetas y córners"},
     "BRASILEIRAO": {"slug": "bra.1", "name": "Brasileirão Betano", "profile": "Alto Volumen de Tiros • Extremos encaradores y atajadas"},
     "COLOMBIA": {"slug": "col.1", "name": "Liga BetPlay", "profile": "Cerrada • Equipos que anotan 1 gol y cuidan resultado"},
     "A_LEAGUE": {"slug": "aus.1", "name": "Isuzu A-League", "profile": "Goleadora • Defensas abiertas, ideal para +1.5 y +2.5 Goles"},
 }
 
+SLUG_TO_LEAGUE_NAME = {v["slug"]: v["name"] for v in LIVE_LEAGUES_MAP.values()}
+SLUG_TO_LEAGUE_NAME.update({
+    "esp.copa_del_rey": "Copa del Rey",
+    "eng.league_cup": "EFL Carabao Cup",
+    "ita.coppa_italia": "Coppa Italia",
+    "ger.dfb_pokal": "DFB Pokal",
+    "fra.coupe_de_france": "Coupe de France",
+    "uefa.euro": "UEFA Euro",
+    "concacaf.champions": "CONCACAF Champions Cup",
+})
+
 DEEP_CACHE = {}
 CARTELERA_CACHE = {"timestamp": None, "date_key": None, "matches": []}
+TEAMS_DIRECTORY = {}  # Directorio dinámico de clubes para el buscador estilo Google
 
 
 def normalize_text(text: str) -> str:
-    """Elimina acentos y pasa a minúsculas para comparar nombres sin fallar (ej. Mbappé == Mbappe)."""
     if not text:
         return ""
     nfkd = unicodedata.normalize("NFKD", str(text))
     return "".join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip()
+
+
+def register_team_in_directory(team_obj, league_slug: str, league_name: str):
+    """Registra automáticamente cada club visto en el directorio global para el Buscador."""
+    t_id = str(team_obj.get("id", ""))
+    t_name = team_obj.get("displayName") or team_obj.get("name") or ""
+    if not t_id or not t_name:
+        return
+    TEAMS_DIRECTORY[t_id] = {
+        "teamId": t_id,
+        "name": t_name,
+        "short": team_obj.get("abbreviation") or t_name[:3].upper(),
+        "logo": team_obj.get("logo") or (team_obj.get("logos", [{}])[0].get("href", "") if team_obj.get("logos") else ""),
+        "leagueSlug": league_slug,
+        "leagueName": league_name,
+        "searchKey": normalize_text(f"{t_name} {team_obj.get('abbreviation', '')}")
+    }
 
 
 def parse_kickoff_utc(iso_date_str: str):
@@ -98,11 +126,6 @@ def safe_float(val, default=0.0):
 
 
 def extract_official_team_stats_from_boxscore(box_team_obj):
-    """
-    Lee con precisión quirúrgica las estadísticas oficiales de un equipo en ESPN.
-    Soporta tanto llaves directas (totalShots, shotsOnGoal, shotsOnTarget)
-    como el formato compuesto shotsSummary = "17 (8)" -> 17 tiros, 8 al arco.
-    """
     stats_list = box_team_obj.get("statistics", [])
     stat_map = {}
     for st in stats_list:
@@ -111,7 +134,6 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
         val = st.get("value")
         stat_map[name] = disp if disp != "" else str(val if val is not None else "0")
 
-    # 1. Tiros Totales y Tiros al Arco desde shotsSummary si existe (ej. "15 (4)" o "17 (8)")
     summary_shots, summary_sot = None, None
     if "shotsSummary" in stat_map:
         nums = re.findall(r"\d+", stat_map["shotsSummary"])
@@ -121,7 +143,6 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
         elif len(nums) == 1:
             summary_shots = int(nums[0])
 
-    # 2. Tiros Totales directos
     direct_shots = None
     for k in ["totalShots", "shots"]:
         if k in stat_map:
@@ -130,7 +151,6 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
                 direct_shots = int(nums[0])
                 break
 
-    # 3. Tiros al Arco directos (En ESPN LaLiga/Premier se llama 'shotsOnGoal' o 'shotsOnTarget')
     direct_sot = None
     for k in ["shotsOnGoal", "shotsOnTarget", "onTargetScoringAttempts"]:
         if k in stat_map:
@@ -169,7 +189,7 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
 
 
 def extract_player_stats_from_entry(p_entry):
-    """Extrae tiros, tiros al arco (shotsOnGoal / shotsOnTarget), goles, asistencias y atajadas reales de un jugador."""
+    """Extrae todas las métricas reales disponibles en ESPN para el jugador en ese partido."""
     st_map = {}
     for s in p_entry.get("stats", []):
         s_name = s.get("name", "")
@@ -180,22 +200,21 @@ def extract_player_stats_from_entry(p_entry):
             nums = re.findall(r"\d+", str(s.get("displayValue", "0")))
             st_map[s_name] = float(nums[0]) if nums else 0.0
 
-    shots = int(
-        st_map.get(
-            "totalShots",
-            st_map.get("shots", st_map.get("scoringAttempts", 0))
-        )
-    )
-    sot = int(
-        st_map.get(
-            "shotsOnGoal",
-            st_map.get("shotsOnTarget", st_map.get("onTargetScoringAttempts", 0))
-        )
-    )
+    shots = int(st_map.get("totalShots", st_map.get("shots", st_map.get("scoringAttempts", 0))))
+    sot = int(st_map.get("shotsOnGoal", st_map.get("shotsOnTarget", st_map.get("onTargetScoringAttempts", 0))))
     goals = int(st_map.get("totalGoals", st_map.get("goals", 0)))
     assists = int(st_map.get("goalAssists", st_map.get("assists", 0)))
     saves = int(st_map.get("saves", 0))
     conceded = int(st_map.get("goalsConceded", 0))
+    fouls_committed = int(st_map.get("foulsCommitted", 0))
+    fouls_suffered = int(st_map.get("foulsSuffered", 0))
+    yellow_cards = int(st_map.get("yellowCards", 0))
+    red_cards = int(st_map.get("redCards", 0))
+    offsides = int(st_map.get("offsides", 0))
+    appearances = int(st_map.get("appearances", 1))
+
+    # Estimación real de xG del partido basada en tiros al arco, tiros totales y goles
+    xg_est = round((sot * 0.28) + (max(0, shots - sot) * 0.07) + (goals * 0.15), 2)
 
     return {
         "shots": shots,
@@ -203,47 +222,130 @@ def extract_player_stats_from_entry(p_entry):
         "goals": goals,
         "assists": assists,
         "saves": saves,
-        "conceded": conceded
+        "conceded": conceded,
+        "foulsCommitted": fouls_committed,
+        "foulsSuffered": fouls_suffered,
+        "yellowCards": yellow_cards,
+        "redCards": red_cards,
+        "offsides": offsides,
+        "xg": xg_est,
+        "appearances": appearances
     }
 
 
-def build_pitch_rows_from_roster(roster_list):
+def map_pos_Name_es(pos_abbr: str) -> str:
+    p = (pos_abbr or "M").upper()
+    if "G" in p:
+        return "Portero"
+    if any(k in p for k in ["D", "CB", "LB", "RB"]):
+        return "Defensa"
+    if any(k in p for k in ["F", "W", "S", "CF", "LW", "RW"]):
+        return "Delantero"
+    return "Mediocampista"
+
+
+def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substitutions_list):
+    """
+    Construye:
+    1. Las filas de la cancha interactiva (con los datos completos de cada jugador y por quién salió de cambio).
+    2. La lista completa de convocados (Titulares, Suplentes que entraron y Banca) para la Tabla estilo Imagen 1.
+    """
     starters = [p for p in roster_list if p.get("starter")]
     if not starters:
         starters = roster_list[:11]
 
-    gk, df, mf, fw = [], [], [], []
+    # Mapa rápido de quién salió por quién y quién entró por quién
+    sub_out_map = {}  # nombre_normalizado_saliente -> {"in": nombre_entrante, "min": clock}
+    sub_in_map = {}   # nombre_normalizado_entrante -> {"out": nombre_saliente, "min": clock}
+    for sub in substitutions_list:
+        out_norm = normalize_text(sub.get("out", ""))
+        in_norm = normalize_text(sub.get("in", ""))
+        if out_norm:
+            sub_out_map[out_norm] = {"in": sub.get("in"), "min": sub.get("min")}
+        if in_norm:
+            sub_in_map[in_norm] = {"out": sub.get("out"), "min": sub.get("min")}
 
-    for p in starters[:11]:
+    def enrich_player_object(p):
         athlete = p.get("athlete", {})
         pos_abbr = p.get("position", {}).get("abbreviation", "M").upper()
-        jersey = safe_int(p.get("jersey", athlete.get("jersey", 0)), 10)
-        short_name = athlete.get("shortName") or athlete.get("displayName", "Jugador")
+        jersey = safe_int(p.get("jersey", athlete.get("jersey", 0)), 0)
+        full_name = athlete.get("displayName") or athlete.get("shortName") or "Jugador"
+        short_name = athlete.get("shortName") or full_name
+        norm_full = normalize_text(full_name)
+        norm_short = normalize_text(short_name)
 
         p_st = extract_player_stats_from_entry(p)
-        goals = p_st["goals"]
-        assists = p_st["assists"]
-        shots = p_st["shots"]
-        sot = p_st["sot"]
-        saves = p_st["saves"]
-        subbed_out = p.get("subbedOut", False)
+        is_starter = bool(p.get("starter", False))
+        subbed_out = bool(p.get("subbedOut", False))
+        subbed_in = bool(p.get("subbedIn", False))
 
-        base_rating = 6.7 + (goals * 1.1) + (assists * 0.7) + (sot * 0.25) + (saves * 0.2)
-        rating = round(min(9.8, max(5.6, base_rating)), 1)
+        # Buscar cruce exacto de cambio
+        sub_out_info = sub_out_map.get(norm_full) or sub_out_map.get(norm_short)
+        sub_in_info = sub_in_map.get(norm_full) or sub_in_map.get(norm_short)
+        if not sub_out_info and subbed_out:
+            # Buscar por apellido
+            last_n = norm_full.split()[-1] if norm_full else ""
+            for k, v in sub_out_map.items():
+                if len(last_n) >= 4 and last_n in k:
+                    sub_out_info = v
+                    break
 
-        node = {
+        if not sub_in_info and subbed_in:
+            last_n = norm_full.split()[-1] if norm_full else ""
+            for k, v in sub_in_map.items():
+                if len(last_n) >= 4 and last_n in k:
+                    sub_in_info = v
+                    break
+
+        base_rating = (
+            6.7
+            + (p_st["goals"] * 1.15)
+            + (p_st["assists"] * 0.75)
+            + (p_st["sot"] * 0.25)
+            + (p_st["saves"] * 0.22)
+            + (p_st["foulsSuffered"] * 0.06)
+            - (p_st["yellowCards"] * 0.25)
+            - (p_st["redCards"] * 1.2)
+        )
+        rating = round(min(9.9, max(5.4, base_rating)), 1)
+
+        return {
             "num": jersey,
             "name": short_name,
+            "fullName": full_name,
+            "team": team_abbr,
+            "teamLogo": team_logo,
             "pos": pos_abbr,
+            "posLabel": map_pos_Name_es(pos_abbr),
+            "starter": is_starter,
+            "subbedIn": subbed_in or (sub_in_info is not None),
+            "subbedOut": subbed_out or (sub_out_info is not None),
+            "replacedBy": sub_out_info["in"] if sub_out_info else None,
+            "replacedMin": sub_out_info["min"] if sub_out_info else None,
+            "replacedWho": sub_in_info["out"] if sub_in_info else None,
+            "enteredMin": sub_in_info["min"] if sub_in_info else None,
             "rating": rating,
-            "goals": goals if goals > 0 else None,
-            "assists": assists if assists > 0 else None,
-            "shots": shots,
-            "sot": sot,
-            "saves": saves,
-            "subOut": "Cambio" if subbed_out else None
+            "goals": p_st["goals"],
+            "assists": p_st["assists"],
+            "shots": p_st["shots"],
+            "sot": p_st["sot"],
+            "xg": p_st["xg"],
+            "saves": p_st["saves"],
+            "conceded": p_st["conceded"],
+            "foulsCommitted": p_st["foulsCommitted"],
+            "foulsSuffered": p_st["foulsSuffered"],
+            "yellowCards": p_st["yellowCards"],
+            "redCards": p_st["redCards"],
         }
 
+    enriched_all = [enrich_player_object(p) for p in roster_list]
+    enriched_starters = [ep for ep in enriched_all if ep["starter"]][:11]
+    if not enriched_starters:
+        enriched_starters = enriched_all[:11]
+
+    gk, df, mf, fw = [], [], [], []
+    for node in enriched_starters:
+        pos_abbr = node["pos"]
         if "G" in pos_abbr:
             gk.append(node)
         elif any(k in pos_abbr for k in ["D", "B", "CB", "LB", "RB"]):
@@ -254,28 +356,49 @@ def build_pitch_rows_from_roster(roster_list):
             mf.append(node)
 
     rows = [r for r in [gk, df, mf, fw] if r]
-    if not rows and starters:
-        rows = [[{
-            "num": i + 1,
-            "name": s.get("athlete", {}).get("shortName", "Titular"),
-            "rating": 7.0
-        } for i, s in enumerate(starters[:4])]]
 
-    return rows
+    # Ordenar convocados por Rating de mayor a menor (como en la Imagen 1)
+    squad_sorted = sorted(
+        enriched_all,
+        key=lambda x: (1 if (x["starter"] or x["subbedIn"]) else 0, x["rating"], x["shots"]),
+        reverse=True
+    )
+
+    return rows, squad_sorted
 
 
-async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, event_id: str, target_team_id: str):
-    cache_key = f"summary_v7_{event_id}_{target_team_id}"
+async def parse_past_match_summary(
+    client: httpx.AsyncClient,
+    league_slug: str,
+    event_id: str,
+    target_team_id: str,
+    fallback_comp_name: str = ""
+):
+    cache_key = f"summary_v8_{event_id}_{target_team_id}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
 
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}"
-    try:
-        resp = await client.get(url, headers=HEADERS)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
+    # Intentar primero con el league_slug indicado y si falla con 'all'
+    urls_to_try = [
+        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}",
+        f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={event_id}"
+    ]
 
+    data = None
+    for url in urls_to_try:
+        try:
+            resp = await client.get(url, headers=HEADERS)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("header"):
+                    break
+        except Exception:
+            continue
+
+    if not data:
+        return None
+
+    try:
         header_comp = data.get("header", {}).get("competitions", [{}])[0]
         competitors = header_comp.get("competitors", [])
         if len(competitors) < 2:
@@ -291,8 +414,20 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         away_name = away_c.get("team", {}).get("displayName", "Visitante")
         home_abbr = home_c.get("team", {}).get("abbreviation") or home_name[:3].upper()
         away_abbr = away_c.get("team", {}).get("abbreviation") or away_name[:3].upper()
+        home_logo = home_c.get("team", {}).get("logos", [{}])[0].get("href", "") if home_c.get("team", {}).get("logos") else ""
+        away_logo = away_c.get("team", {}).get("logos", [{}])[0].get("href", "") if away_c.get("team", {}).get("logos") else ""
         home_score = safe_int(home_c.get("score", 0))
         away_score = safe_int(away_c.get("score", 0))
+
+        comp_name = (
+            data.get("header", {}).get("league", {}).get("name")
+            or fallback_comp_name
+            or SLUG_TO_LEAGUE_NAME.get(league_slug, "Torneo Oficial")
+        )
+
+        # Registrar ambos clubes en el directorio del buscador
+        register_team_in_directory({"id": home_id_str, "displayName": home_name, "abbreviation": home_abbr, "logo": home_logo}, league_slug, comp_name)
+        register_team_in_directory({"id": away_id_str, "displayName": away_name, "abbreviation": away_abbr, "logo": away_logo}, league_slug, comp_name)
 
         team_id_to_label = {
             home_id_str: f"{home_abbr} • {home_name}",
@@ -307,7 +442,6 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
         date_mx, _ = convert_utc_to_mexico(header_comp.get("date", ""))
         short_score_label = f"{home_abbr} {home_score}-{away_score} {away_abbr}"
 
-        # Emparejar rosters por team.id exacto
         rosters = data.get("rosters", [])
         home_roster_obj, away_roster_obj = {}, {}
         for r_obj in rosters:
@@ -331,88 +465,7 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
                 if ath.get("shortName"):
                     player_to_team_label[ath.get("shortName")] = t_label
 
-        # Emparejar boxscore.teams por team.id exacto
-        box_teams = data.get("boxscore", {}).get("teams", [])
-        home_box_obj, away_box_obj = {}, {}
-        for bt in box_teams:
-            bt_id = str(bt.get("team", {}).get("id", ""))
-            if bt_id == home_id_str:
-                home_box_obj = bt
-            elif bt_id == away_id_str:
-                away_box_obj = bt
-        if not home_box_obj and len(box_teams) > 0:
-            home_box_obj = box_teams[0]
-        if not away_box_obj and len(box_teams) > 1:
-            away_box_obj = box_teams[1]
-
-        h_official = extract_official_team_stats_from_boxscore(home_box_obj)
-        a_official = extract_official_team_stats_from_boxscore(away_box_obj)
-
-        player_perf, gk_perf = [], []
-        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
-            t_abbr = home_abbr if r_idx == 0 else away_abbr
-            t_id = home_id_str if r_idx == 0 else away_id_str
-            for p in r_obj.get("roster", []):
-                ath = p.get("athlete", {})
-                p_name = ath.get("displayName", "Jugador")
-                pos = p.get("position", {}).get("abbreviation", "M")
-                is_starter = bool(p.get("starter", False))
-                subbed_in = bool(p.get("subbedIn", False))
-
-                p_st = extract_player_stats_from_entry(p)
-                sh = p_st["shots"]
-                sot = p_st["sot"]
-                gls = p_st["goals"]
-                ast = p_st["assists"]
-                svs = p_st["saves"]
-                ga = p_st["conceded"]
-
-                if pos == "G" and (is_starter or svs > 0 or subbed_in):
-                    gk_perf.append({
-                        "teamId": t_id,
-                        "team": t_abbr,
-                        "name": p_name,
-                        "saves": svs,
-                        "goalsConceded": ga,
-                        "starter": is_starter,
-                        "matchDate": date_mx[5:],
-                        "matchScore": short_score_label,
-                        "result": result_letter
-                    })
-                elif sh > 0 or sot > 0 or gls > 0 or is_starter or subbed_in:
-                    player_perf.append({
-                        "teamId": t_id,
-                        "team": t_abbr,
-                        "name": p_name,
-                        "pos": pos,
-                        "shots": sh,
-                        "sot": sot,
-                        "goals": gls,
-                        "assists": ast,
-                        "starter": is_starter,
-                        "subbedIn": subbed_in,
-                        "matchDate": date_mx[5:],
-                        "matchScore": short_score_label,
-                        "result": result_letter
-                    })
-
-        # Si el boxscore oficial no reportó tiros, usar la suma exacta de la plantilla de ese partido
-        shots_pair = [
-            h_official["shots"] if h_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == home_id_str),
-            a_official["shots"] if a_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == away_id_str),
-        ]
-        sot_pair = [
-            h_official["sot"] if h_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == home_id_str),
-            a_official["sot"] if a_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == away_id_str),
-        ]
-        saves_pair = [
-            h_official["saves"] if h_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == home_id_str),
-            a_official["saves"] if a_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == away_id_str),
-        ]
-        corners_pair = [h_official["corners"], a_official["corners"]]
-        total_cards_pair = [h_official["cards"], a_official["cards"]]
-        poss_pair = [h_official["possession"], a_official["possession"]]
-
+        # Extraer goles, tarjetas y sustituciones primero para inyectarlos en los nodos de la cancha
         scorers, cards, substitutions = [], [], []
         for ev in data.get("keyEvents", []):
             ev_type = ev.get("type", {}).get("text", "").lower()
@@ -444,21 +497,113 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
                     "min": clock,
                     "out": player_out,
                     "in": player_in,
-                    "note": f"Cambio al {clock}"
+                    "note": f"Entró {player_in} por {player_out} ({clock})"
                 })
+
+        box_teams = data.get("boxscore", {}).get("teams", [])
+        home_box_obj, away_box_obj = {}, {}
+        for bt in box_teams:
+            bt_id = str(bt.get("team", {}).get("id", ""))
+            if bt_id == home_id_str:
+                home_box_obj = bt
+            elif bt_id == away_id_str:
+                away_box_obj = bt
+        if not home_box_obj and len(box_teams) > 0:
+            home_box_obj = box_teams[0]
+        if not away_box_obj and len(box_teams) > 1:
+            away_box_obj = box_teams[1]
+
+        h_official = extract_official_team_stats_from_boxscore(home_box_obj)
+        a_official = extract_official_team_stats_from_boxscore(away_box_obj)
+
+        # Construir filas interactivas de cancha y tablas de convocados (Imagen 1)
+        home_rows, home_squad_table = build_pitch_and_squad_from_roster(
+            home_roster_obj.get("roster", []), home_abbr, home_logo, substitutions
+        )
+        away_rows, away_squad_table = build_pitch_and_squad_from_roster(
+            away_roster_obj.get("roster", []), away_abbr, away_logo, substitutions
+        )
+
+        player_perf, gk_perf = [], []
+        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
+            t_abbr = home_abbr if r_idx == 0 else away_abbr
+            t_id = home_id_str if r_idx == 0 else away_id_str
+            for p in r_obj.get("roster", []):
+                ath = p.get("athlete", {})
+                p_name = ath.get("displayName", "Jugador")
+                pos = p.get("position", {}).get("abbreviation", "M")
+                is_starter = bool(p.get("starter", False))
+                subbed_in = bool(p.get("subbedIn", False))
+
+                p_st = extract_player_stats_from_entry(p)
+                sh = p_st["shots"]
+                sot = p_st["sot"]
+                gls = p_st["goals"]
+                ast = p_st["assists"]
+                svs = p_st["saves"]
+                ga = p_st["conceded"]
+
+                if pos == "G" and (is_starter or svs > 0 or subbed_in):
+                    gk_perf.append({
+                        "teamId": t_id,
+                        "team": t_abbr,
+                        "name": p_name,
+                        "saves": svs,
+                        "goalsConceded": ga,
+                        "starter": is_starter,
+                        "matchDate": date_mx[5:],
+                        "matchScore": short_score_label,
+                        "competition": comp_name,
+                        "result": result_letter
+                    })
+                elif sh > 0 or sot > 0 or gls > 0 or is_starter or subbed_in:
+                    player_perf.append({
+                        "teamId": t_id,
+                        "team": t_abbr,
+                        "name": p_name,
+                        "pos": pos,
+                        "shots": sh,
+                        "sot": sot,
+                        "goals": gls,
+                        "assists": ast,
+                        "starter": is_starter,
+                        "subbedIn": subbed_in,
+                        "matchDate": date_mx[5:],
+                        "matchScore": short_score_label,
+                        "competition": comp_name,
+                        "result": result_letter
+                    })
+
+        shots_pair = [
+            h_official["shots"] if h_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == home_id_str),
+            a_official["shots"] if a_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == away_id_str),
+        ]
+        sot_pair = [
+            h_official["sot"] if h_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == home_id_str),
+            a_official["sot"] if a_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == away_id_str),
+        ]
+        saves_pair = [
+            h_official["saves"] if h_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == home_id_str),
+            a_official["saves"] if a_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == away_id_str),
+        ]
+        corners_pair = [h_official["corners"], a_official["corners"]]
+        total_cards_pair = [h_official["cards"], a_official["cards"]]
+        poss_pair = [h_official["possession"], a_official["possession"]]
 
         home_formation = home_roster_obj.get("formation", "4-2-3-1") or "4-2-3-1"
         away_formation = away_roster_obj.get("formation", "4-3-3") or "4-3-3"
 
-        home_rows = build_pitch_rows_from_roster(home_roster_obj.get("roster", []))
-        away_rows = build_pitch_rows_from_roster(away_roster_obj.get("roster", []))
-
         parsed_obj = {
             "id": str(event_id),
+            "fullDate": date_mx,
             "date": date_mx[5:],
-            "competition": data.get("header", {}).get("league", {}).get("name", "Torneo Oficial"),
+            "competition": comp_name,
             "homeName": home_name,
             "awayName": away_name,
+            "homeAbbr": home_abbr,
+            "awayAbbr": away_abbr,
+            "homeLogo": home_logo,
+            "awayLogo": away_logo,
             "homeScore": home_score,
             "awayScore": away_score,
             "result": result_letter,
@@ -476,6 +621,11 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
             "cards": cards,
             "teamLineupRows": home_rows if is_home_target else away_rows,
             "oppLineupRows": away_rows if is_home_target else home_rows,
+            "squadTable": {
+                "home": home_squad_table,
+                "away": away_squad_table,
+                "all": sorted(home_squad_table + away_squad_table, key=lambda x: x["rating"], reverse=True)
+            },
             "substitutions": substitutions,
             "_rawPlayerPerf": player_perf,
             "_rawGkPerf": gk_perf,
@@ -497,33 +647,75 @@ async def parse_past_match_summary(client: httpx.AsyncClient, league_slug: str, 
 
 
 async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id: str):
+    """
+    MEJORA 1: Descarga los últimos 5 partidos jugados del club a través de TODAS LAS COMPETICIONES
+    (Liga + Champions + Europa League + Copa Nacional + Libertadores) y muestra de qué competencia fue cada uno.
+    """
     if not team_id:
         return []
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{team_id}/schedule"
-    try:
-        resp = await client.get(url, headers=HEADERS)
-        if resp.status_code != 200:
+
+    # Consultamos el calendario global ('all') + la liga base + torneos continentales para no perder ningún juego de Champions/Copa
+    candidate_slugs = ["all", league_slug]
+    if league_slug in ["esp.1", "eng.1", "ita.1", "ger.1", "fra.1", "ned.1", "por.1", "bel.1"]:
+        candidate_slugs.extend(["uefa.champions", "uefa.europa"])
+    elif league_slug in ["arg.1", "bra.1", "col.1"]:
+        candidate_slugs.extend(["conmebol.libertadores", "conmebol.sudamericana"])
+
+    seen_slugs = []
+    for s in candidate_slugs:
+        if s and s not in seen_slugs:
+            seen_slugs.append(s)
+
+    async def fetch_schedule_slug(s_slug):
+        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/teams/{team_id}/schedule"
+        try:
+            resp = await client.get(url, headers=HEADERS)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            lg_default_name = data.get("league", {}).get("name") or SLUG_TO_LEAGUE_NAME.get(s_slug, "Torneo Oficial")
+            out = []
+            for ev in data.get("events", []):
+                comp = ev.get("competitions", [{}])[0]
+                st_type = comp.get("status", {}).get("type", {})
+                st_state = st_type.get("state", "").lower()
+                st_completed = st_type.get("completed", False)
+                if st_completed or st_state == "post":
+                    ev_lg_name = (
+                        ev.get("league", {}).get("name")
+                        or comp.get("league", {}).get("name")
+                        or ev.get("season", {}).get("displayName")
+                        or lg_default_name
+                    )
+                    ev_slug = s_slug if s_slug != "all" else league_slug
+                    out.append({
+                        "id": str(ev.get("id")),
+                        "date": ev.get("date", ""),
+                        "slug": ev_slug,
+                        "compName": ev_lg_name
+                    })
+            return out
+        except Exception:
             return []
-        events = resp.json().get("events", [])
-        completed = []
-        for ev in events:
-            st_type = ev.get("competitions", [{}])[0].get("status", {}).get("type", {})
-            st_state = st_type.get("state", "").lower()
-            st_completed = st_type.get("completed", False)
-            if st_completed or st_state == "post":
-                completed.append(ev)
 
-        last_5_events = completed[-5:]
-        last_5_events.reverse()
+    batches = await asyncio.gather(*(fetch_schedule_slug(s) for s in seen_slugs))
+    merged_events = {}
+    for b in batches:
+        for ev_item in b:
+            ev_id = ev_item["id"]
+            if ev_id not in merged_events or merged_events[ev_id]["compName"] == "Torneo Oficial":
+                merged_events[ev_id] = ev_item
 
-        tasks = [
-            parse_past_match_summary(client, league_slug, str(ev.get("id")), str(team_id))
-            for ev in last_5_events
-        ]
-        results = await asyncio.gather(*tasks)
-        return [r for r in results if r is not None]
-    except Exception:
-        return []
+    sorted_completed = sorted(merged_events.values(), key=lambda x: x["date"])
+    last_5_events = sorted_completed[-5:]
+    last_5_events.reverse()
+
+    tasks = [
+        parse_past_match_summary(client, ev["slug"], ev["id"], str(team_id), ev["compName"])
+        for ev in last_5_events
+    ]
+    results = await asyncio.gather(*tasks)
+    return [r for r in results if r is not None]
 
 
 def analyze_team_tactical_style(last5_list, team_name, is_home=True):
@@ -596,7 +788,69 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
 @app.get("/")
 @app.get("/api/health")
 async def health_check():
-    return {"ok": True, "status": "online", "version": "6.0.0"}
+    return {"ok": True, "status": "online", "version": "7.0.0"}
+
+
+@app.get("/api/teams/search")
+async def search_clubs_autocomplete(q: str = ""):
+    """
+    MEJORA 2: Buscador Inteligente de Clubes estilo Google.
+    Si escribes 'Bar', devuelve 'FC Barcelona', 'Barracas Central', etc.
+    """
+    query_norm = normalize_text(q)
+    # Si el directorio aún está vacío, poblarlo rápido desde el caché de cartelera
+    if not TEAMS_DIRECTORY and CARTELERA_CACHE["matches"]:
+        for m in CARTELERA_CACHE["matches"]:
+            register_team_in_directory(
+                {"id": m["homeTeam"]["teamApiId"], "displayName": m["homeTeam"]["name"], "abbreviation": m["homeTeam"]["short"], "logo": m["homeTeam"]["logo"]},
+                m.get("leagueSlug", "esp.1"),
+                m.get("leagueName", "Liga")
+            )
+            register_team_in_directory(
+                {"id": m["awayTeam"]["teamApiId"], "displayName": m["awayTeam"]["name"], "abbreviation": m["awayTeam"]["short"], "logo": m["awayTeam"]["logo"]},
+                m.get("leagueSlug", "esp.1"),
+                m.get("leagueName", "Liga")
+            )
+
+    all_clubs = list(TEAMS_DIRECTORY.values())
+    if not query_norm:
+        return {"ok": True, "teams": all_clubs[:15]}
+
+    # Priorizar los que empiezan con el texto buscado y luego los que lo contienen
+    starts_with = [c for c in all_clubs if normalize_text(c["name"]).startswith(query_norm) or normalize_text(c["short"]).startswith(query_norm)]
+    contains = [c for c in all_clubs if c not in starts_with and query_norm in c["searchKey"]]
+
+    results = (starts_with + contains)[:12]
+    return {"ok": True, "teams": results}
+
+
+@app.get("/api/team-profile")
+async def get_club_full_profile(team_id: str, league_slug: str = "esp.1", team_name: str = "Club", team_abbr: str = "CLB", team_logo: str = ""):
+    """
+    Devuelve el perfil completo del club seleccionado en el Buscador:
+    - Su último partido jugado (con plantilla en cancha interactiva, estadísticas al lado y tabla de convocados).
+    - Sus últimos 5 partidos jugados en todas las competiciones.
+    - Su análisis táctico y ranking de jugadores en los últimos 5 juegos.
+    """
+    async with httpx.AsyncClient(timeout=16.0, follow_redirects=True) as client:
+        last_5_matches = await fetch_team_last_5(client, league_slug, team_id)
+
+    tactics = analyze_team_tactical_style(last_5_matches, team_name, is_home=True)
+    latest_match = last_5_matches[0] if last_5_matches else None
+
+    return {
+        "ok": True,
+        "club": {
+            "teamId": team_id,
+            "name": team_name,
+            "short": team_abbr,
+            "logo": team_logo,
+            "leagueSlug": league_slug
+        },
+        "tactics": tactics,
+        "latestMatch": latest_match,
+        "last5Matches": last_5_matches
+    }
 
 
 @app.get("/api/match-deep-stats")
@@ -608,13 +862,13 @@ async def get_match_deep_stats(
     away_abbr: str = "VIS",
     event_id: str = ""
 ):
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=16.0, follow_redirects=True) as client:
         home_last5, away_last5 = await asyncio.gather(
             fetch_team_last_5(client, league_slug, home_id),
             fetch_team_last_5(client, league_slug, away_id)
         )
 
-        confirmed_lineup = {"confirmed": False, "homeFormation": None, "awayFormation": None, "homeRows": [], "awayRows": []}
+        confirmed_lineup = {"confirmed": False, "homeFormation": None, "awayFormation": None, "homeRows": [], "awayRows": [], "squadTable": None}
         if event_id:
             try:
                 ev_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}"
@@ -623,15 +877,20 @@ async def get_match_deep_stats(
                     ev_data = ev_resp.json()
                     rosters = ev_data.get("rosters", [])
                     if len(rosters) >= 2 and rosters[0].get("roster") and rosters[1].get("roster"):
-                        h_rows = build_pitch_rows_from_roster(rosters[0].get("roster", []))
-                        a_rows = build_pitch_rows_from_roster(rosters[1].get("roster", []))
+                        h_rows, h_sq = build_pitch_and_squad_from_roster(rosters[0].get("roster", []), home_abbr, "", [])
+                        a_rows, a_sq = build_pitch_and_squad_from_roster(rosters[1].get("roster", []), away_abbr, "", [])
                         if h_rows and a_rows:
                             confirmed_lineup = {
                                 "confirmed": True,
                                 "homeFormation": rosters[0].get("formation", "4-2-3-1") or "4-2-3-1",
                                 "awayFormation": rosters[1].get("formation", "4-3-3") or "4-3-3",
                                 "homeRows": h_rows,
-                                "awayRows": a_rows
+                                "awayRows": a_rows,
+                                "squadTable": {
+                                    "home": h_sq,
+                                    "away": a_sq,
+                                    "all": sorted(h_sq + a_sq, key=lambda x: x["rating"], reverse=True)
+                                }
                             }
             except Exception:
                 pass
@@ -672,6 +931,7 @@ async def get_match_deep_stats(
                         "team": team_short,
                         "isHome": is_home_team,
                         "pos": p["pos"],
+                        "posLabel": map_pos_Name_es(p["pos"]),
                         "games": 0,
                         "starts": 0,
                         "subIns": 0,
@@ -693,6 +953,7 @@ async def get_match_deep_stats(
                 agg_players[key]["matchLogs"].append({
                     "date": p["matchDate"],
                     "score": p["matchScore"],
+                    "competition": p.get("competition", ""),
                     "result": p["result"],
                     "shots": p["shots"],
                     "sot": p["sot"],
@@ -720,6 +981,7 @@ async def get_match_deep_stats(
                 agg_gks[gkey]["matchLogs"].append({
                     "date": g["matchDate"],
                     "score": g["matchScore"],
+                    "competition": g.get("competition", ""),
                     "result": g["result"],
                     "saves": g["saves"],
                     "conceded": g["goalsConceded"]
@@ -752,7 +1014,7 @@ async def get_match_deep_stats(
         agg_players.values(),
         key=lambda x: (x["sot"], x["shots"], x["goals"]),
         reverse=True
-    )[:10]
+    )[:14]
 
     key_players_list = []
     for idx, sh in enumerate(sorted_shooters):
@@ -771,12 +1033,17 @@ async def get_match_deep_stats(
             else f"✅ Titular {sh['starts']}/{gms} • {venue_factor} • 1+ al arco en {games_with_sot}/{gms} juegos."
         )
 
+        base_rt = 6.8 + (sh["goals"] * 0.35) + (sh["assists"] * 0.25) + (avg_sot * 0.3)
+        rating_l5 = round(min(9.6, max(6.1, base_rt)), 1)
+
         key_players_list.append({
             "id": f"real-p-{idx}",
             "name": sh["name"],
             "team": sh["team"],
             "isHome": sh["isHome"],
             "pos": sh["pos"],
+            "posLabel": sh["posLabel"],
+            "rating": rating_l5,
             "bancaPlus": True,
             "totalShotsL5": sh["shots"],
             "totalSoTL5": sh["sot"],
@@ -863,6 +1130,11 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
 
             for ev in events:
                 comp = ev.get("competitions", [{}])[0]
+                competitors = comp.get("competitors", [])
+                if len(competitors) >= 2:
+                    for c_item in competitors:
+                        register_team_in_directory(c_item.get("team", {}), league_info["slug"], league_info["name"])
+
                 status_type = comp.get("status", {}).get("type", {})
                 state = status_type.get("state", "").lower()
                 completed = status_type.get("completed", False)
@@ -878,7 +1150,6 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
                 if date_mx < today_mx_str:
                     continue
 
-                competitors = comp.get("competitors", [])
                 if len(competitors) < 2:
                     continue
 
@@ -1005,9 +1276,10 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
             "matches": valid_cached
         }
 
+    # Incluimos ayer (-1) solo para registrar clubes en el buscador, pero filtramos partidos vigentes >= hoy
     target_dates = [
         (now_mx + timedelta(days=i)).strftime("%Y%m%d")
-        for i in range(days_ahead + 1)
+        for i in range(-1, days_ahead + 1)
     ]
 
     sem = asyncio.Semaphore(12)
@@ -1041,11 +1313,6 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
 
 @app.post("/api/verify-tickets")
 async def auto_verify_tickets(payload: dict):
-    """
-    Auto-Verificador 100% Oficial:
-    Re-audita todos los partidos de los tickets (incluso los que habían quedado mal leídos antes)
-    usando las llaves exactas de ESPN (shotsOnGoal, shotsSummary, totalShots) y normalización sin acentos.
-    """
     tickets = payload.get("tickets", [])
     learning_logs = payload.get("learningLogs", [])
     updated_any = False
@@ -1105,7 +1372,6 @@ async def auto_verify_tickets(payload: dict):
                     if not (completed or state == "post"):
                         continue
 
-                    # 1. Emparejar boxscore por team.id exacto (para que Osasuna sea 15 remates y 4 al arco, y Real Madrid 17 y 8)
                     box_teams = data.get("boxscore", {}).get("teams", [])
                     home_box_obj, away_box_obj = {}, {}
                     for bt in box_teams:
@@ -1122,7 +1388,6 @@ async def auto_verify_tickets(payload: dict):
                     h_official = extract_official_team_stats_from_boxscore(home_box_obj)
                     a_official = extract_official_team_stats_from_boxscore(away_box_obj)
 
-                    # 2. Extraer estadísticas individuales de jugadores en rosters
                     rosters = data.get("rosters", [])
                     all_roster_players = []
                     home_roster_shots, away_roster_shots = 0, 0
@@ -1151,7 +1416,6 @@ async def auto_verify_tickets(payload: dict):
                                 **p_st
                             })
 
-                    # Usar SIEMPRE el número oficial del boxscore (ej. 15 y 4 para Osasuna, 17 y 8 para Real Madrid)
                     home_shots = h_official["shots"] if h_official["shots"] > 0 else home_roster_shots
                     away_shots = a_official["shots"] if a_official["shots"] > 0 else away_roster_shots
                     home_sot = h_official["sot"] if h_official["sot"] > 0 else home_roster_sot
@@ -1213,7 +1477,6 @@ async def auto_verify_tickets(payload: dict):
                         actual_val = home_shots if is_home_pick else away_shots
                         hit_result = actual_val >= target_line
                     else:
-                        # Búsqueda de jugador sin importar acentos ni siglas (ej. "Kylian Mbappé RMA | 1.0+")
                         raw_left = selection.split("|")[0].split("(")[0].strip()
                         tokens = raw_left.split()
                         if len(tokens) > 1 and tokens[-1].isupper() and len(tokens[-1]) <= 4:
@@ -1248,7 +1511,6 @@ async def auto_verify_tickets(payload: dict):
                                 actual_val = matched_p["shots"]
                             hit_result = actual_val >= target_line
 
-                    prev_hit = leg.get("hit")
                     leg["actualValue"] = actual_val
                     leg["targetValue"] = target_line
                     leg["hit"] = bool(hit_result)

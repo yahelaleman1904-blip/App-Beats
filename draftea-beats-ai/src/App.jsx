@@ -1,4 +1,5 @@
 // src/App.jsx
+import ClubSearchView from './components/ClubSearchView';
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import TopHeaderAndFilters from './components/TopHeaderAndFilters';
 import BottomNav from './components/BottomNav';
@@ -289,6 +290,11 @@ export default function App() {
                 learningLogs={learningLogs}
               />
             )}
+            
+              {activeTab === 'search' && (
+              <ClubSearchView allMatches={liveMatches} />
+            )}
+
             {activeTab === 'history' && (
               <HistoryVaultView
                 tickets={savedTickets}

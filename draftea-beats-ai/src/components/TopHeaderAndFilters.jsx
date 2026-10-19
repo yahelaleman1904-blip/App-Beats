@@ -1,37 +1,31 @@
 // src/components/TopHeaderAndFilters.jsx
-import React, { useState } from 'react';
-import { Wifi, Check, RotateCcw, Calendar, Pin, Globe, Trophy } from 'lucide-react';
-import { LEAGUES_CATALOG, AVAILABLE_DATES, QUICK_PIN_TEAMS } from '../data/leaguesData';
+import React, { useMemo } from 'react';
+import { Globe, RotateCcw } from 'lucide-react';
+import { LEAGUES_CATALOG, FAVORITE_TEAMS } from '../data/leaguesData';
 import { triggerHaptic } from '../utils/haptics';
 
-function LeagueBadgeLogo({ league }) {
-  const [imgError, setImgError] = useState(false);
+function buildDynamic7Days() {
+  const dayNames = ['DOM', 'LUN', 'MAR', 'MIE', 'JUE', 'VIE', 'SAB'];
+  const monthNames = ['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC'];
+  const result = [{ id: 'ALL', label: 'TODOS' }];
+  const now = new Date();
 
-  if (league.id === 'ALL' || !league.logo || imgError) {
-    return (
-      <div className="flex flex-col items-center justify-center">
-        {league.id === 'ALL' ? (
-          <Globe className="w-5 h-5 text-purple-400" />
-        ) : (
-          <span className="text-[11px] font-black text-white tracking-tighter">
-            {league.short}
-          </span>
-        )}
-      </div>
-    );
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const isoDate = `${yyyy}-${mm}-${dd}`;
+
+    const dayLabel = i === 0 ? 'HOY' : dayNames[d.getDay()];
+    const monthLabel = monthNames[d.getMonth()];
+    result.push({
+      id: isoDate,
+      label: `${dayLabel} ${d.getDate()} ${monthLabel}`
+    });
   }
-
-  return (
-    <div className="w-8 h-8 rounded-full bg-white/95 p-1 flex items-center justify-center shadow-inner">
-      <img
-        src={league.logo}
-        alt={league.officialName}
-        className="w-full h-full object-contain"
-        loading="lazy"
-        onError={() => setImgError(true)}
-      />
-    </div>
-  );
+  return result;
 }
 
 export default function TopHeaderAndFilters({
@@ -43,205 +37,175 @@ export default function TopHeaderAndFilters({
   pinnedTeams,
   onTogglePinTeam,
   onResetFilters,
-  globalAccuracy = 91.9
+  globalAccuracy
 }) {
-  const isHistoryView = activeTab === 'history';
+  const isAllLeagues = selectedLeagues.length === 0;
+  const isAllDates = selectedDates.length === 0;
+  const dynamicDays = useMemo(() => buildDynamic7Days(), []);
+
+  const accuracyLabel =
+    globalAccuracy === 'En espera' ? 'SIN DATOS' : `${globalAccuracy}% HIT`;
 
   return (
     <header className="relative z-30 bg-[#0b0d13] border-b border-gray-800/80">
-      <div className="max-w-md sm:max-w-3xl mx-auto px-3.5 pt-3">
-        
-        {/* BARRA SUPERIOR (Siempre visible pero sin dinero) */}
-        <div className="flex items-center justify-between mb-2.5">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center font-black text-white text-lg shadow-lg shadow-purple-600/25">
+      <div className="max-w-4xl mx-auto px-3 pt-2.5 pb-2 space-y-2.5">
+        {/* BARRA SUPERIOR COMERCIAL */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center font-black text-white text-sm shadow">
               D
             </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-black tracking-wider text-white text-sm sm:text-base">
-                  DRAFTEA
-                </span>
-                <span className="text-[9px] font-extrabold bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1.5 py-0.5 rounded">
-                  BEATS AI
-                </span>
-              </div>
-              <p className="text-[10px] text-gray-400">
-                {isHistoryView
-                  ? 'Registro de Tickets, Efectividad y Auto-Aprendizaje'
-                  : 'Stats L10 • Control de Rotaciones • Banca+ (B+)'}
-              </p>
+            <div className="flex items-center gap-1.5">
+              <h1 className="text-sm sm:text-base font-black tracking-tight text-white">
+                DRAFTEA
+              </h1>
+              <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                BEATS AI
+              </span>
             </div>
           </div>
 
-          {/* Estado Online + Precisión */}
           <div className="flex items-center gap-1.5">
-            <div className="flex items-center gap-1 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded-full">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-[11px] font-bold text-emerald-400">
-                {globalAccuracy}% Hit
+            <div className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span className="text-[10px] font-black text-emerald-400">
+                {accuracyLabel}
               </span>
             </div>
 
-            <div className="flex items-center gap-1 bg-[#141824] border border-gray-800 px-2.5 py-1 rounded-full">
-              <Wifi className="w-3 h-3 text-emerald-400" />
-              <span className="text-[10px] font-semibold text-gray-300">LIVE</span>
-            </div>
+            {(selectedLeagues.length > 0 || selectedDates.length > 0) && (
+              <button
+                onClick={() => {
+                  triggerHaptic('light');
+                  onResetFilters();
+                }}
+                className="flex items-center gap-1 px-2 py-1 rounded-full bg-gray-800/90 text-[10px] font-bold text-gray-300 hover:text-white cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Limpiar</span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* SI ESTAMOS EN HISTORIAL: Mostrar solo un banner limpio de Tickets */}
-        {isHistoryView ? (
-          <div className="bg-gradient-to-r from-purple-900/30 via-[#141824] to-indigo-900/20 border border-purple-500/25 rounded-xl px-3.5 py-2.5 flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <Trophy className="w-4 h-4 text-amber-400 shrink-0" />
-              <div>
-                <h1 className="text-xs font-extrabold text-white uppercase tracking-wider">
-                  Bóveda de Tickets y Efectividad IA
-                </h1>
-                <p className="text-[11px] text-gray-400">
-                  Toca cualquier ticket para desplegar sus selecciones y auditoría de fallos.
-                </p>
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* SI ESTAMOS EN ESTADÍSTICAS O CREAR BEATS: Mostrar Competiciones, Fechas y Fila Cero */
+        {(activeTab === 'stats' || activeTab === 'beats') && (
           <>
-            {/* Encabezado de Competiciones */}
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
-                🌍 {LEAGUES_CATALOG.length - 1} Competiciones Oficiales:
-              </span>
-              {(selectedLeagues.length > 0 || selectedDates.length > 0 || pinnedTeams.length > 0) && (
-                <button
-                  onClick={() => {
-                    triggerHaptic('light');
-                    onResetFilters();
-                  }}
-                  className="flex items-center gap-1 text-[10px] text-purple-400 hover:text-purple-300 font-bold cursor-pointer"
+            {/* CARRUSEL DE LIGAS COMPACTO */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+              <button
+                onClick={() => {
+                  triggerHaptic('light');
+                  onToggleLeague('ALL');
+                }}
+                className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
+              >
+                <div
+                  className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center border-2 transition-all ${
+                    isAllLeagues
+                      ? 'bg-purple-600/25 border-purple-400 shadow'
+                      : 'bg-[#141824] border-gray-800 opacity-70'
+                  }`}
                 >
-                  <RotateCcw className="w-3 h-3" /> Limpiar filtros
-                </button>
-              )}
-            </div>
+                  <Globe className="w-4 h-4 sm:w-5 sm:h-5 text-purple-300" />
+                </div>
+                <span
+                  className={`text-[9px] font-extrabold ${
+                    isAllLeagues ? 'text-white' : 'text-gray-400'
+                  }`}
+                >
+                  Todas
+                </span>
+              </button>
 
-            {/* CARRUSEL CON LOGOS OFICIALES */}
-            <div className="flex items-center gap-2.5 overflow-x-auto no-scrollbar py-1.5">
-              {LEAGUES_CATALOG.map((league) => {
-                const isAll = league.id === 'ALL';
-                const isActive = isAll
-                  ? selectedLeagues.length === 0
-                  : selectedLeagues.includes(league.id);
-
+              {LEAGUES_CATALOG.map((lg) => {
+                const isSelected = selectedLeagues.includes(lg.id);
                 return (
                   <button
-                    key={league.id}
+                    key={lg.id}
                     onClick={() => {
                       triggerHaptic('light');
-                      onToggleLeague(league.id);
+                      onToggleLeague(lg.id);
                     }}
-                    title={league.officialName}
-                    className="flex flex-col items-center gap-1 shrink-0 group cursor-pointer w-[62px]"
+                    className="flex flex-col items-center gap-1 shrink-0 cursor-pointer max-w-[58px]"
                   >
                     <div
-                      className={`relative w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 border-2 ${
-                        isActive
-                          ? 'bg-purple-600/25 border-purple-500 shadow-md shadow-purple-600/30 scale-105'
-                          : 'bg-[#141824] border-gray-800 hover:border-gray-700'
+                      className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full p-1.5 flex items-center justify-center border-2 transition-all bg-white ${
+                        isSelected
+                          ? 'border-purple-400 scale-105 shadow'
+                          : 'border-gray-800 opacity-80'
                       }`}
                     >
-                      <LeagueBadgeLogo league={league} />
-
-                      {isActive && (
-                        <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-emerald-500 text-black flex items-center justify-center shadow">
-                          <Check className="w-2.5 h-2.5 stroke-[3]" />
-                        </span>
-                      )}
+                      <img
+                        src={lg.logo}
+                        alt={lg.short}
+                        className="w-full h-full object-contain"
+                      />
                     </div>
                     <span
-                      className={`text-[9px] font-bold text-center leading-tight line-clamp-1 w-full ${
-                        isActive ? 'text-white' : 'text-gray-400 group-hover:text-gray-200'
+                      className={`text-[9px] font-bold truncate w-full text-center ${
+                        isSelected ? 'text-purple-300 font-extrabold' : 'text-gray-400'
                       }`}
                     >
-                      {league.name}
+                      {lg.short}
                     </span>
                   </button>
                 );
               })}
             </div>
 
-            {/* BARRA DE FECHAS (Multi-selección) */}
-            <div className="flex items-center gap-1.5 mt-2 overflow-x-auto no-scrollbar">
-              <div className="flex items-center gap-1 text-[10px] font-bold text-gray-400 shrink-0 mr-1">
-                <Calendar className="w-3 h-3 text-purple-400" />
-                <span>DÍAS:</span>
-              </div>
-
-              {AVAILABLE_DATES.map((dateObj) => {
-                const isAll = dateObj.id === 'ALL';
-                const isActive = isAll
-                  ? selectedDates.length === 0
-                  : selectedDates.includes(dateObj.id);
-
+            {/* BARRA DE DÍAS */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+              {dynamicDays.map((d) => {
+                const active =
+                  d.id === 'ALL' ? isAllDates : selectedDates.includes(d.id);
                 return (
                   <button
-                    key={dateObj.id}
+                    key={d.id}
                     onClick={() => {
                       triggerHaptic('light');
-                      onToggleDate(dateObj.id);
+                      onToggleDate(d.id);
                     }}
-                    className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold shrink-0 transition-all cursor-pointer border ${
-                      isActive
-                        ? 'bg-purple-600 text-white border-purple-400 shadow-sm shadow-purple-600/30'
+                    className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold whitespace-nowrap border transition-all cursor-pointer ${
+                      active
+                        ? 'bg-purple-600 text-white border-purple-400'
                         : 'bg-[#141824] text-gray-400 border-gray-800 hover:text-gray-200'
                     }`}
                   >
-                    {dateObj.label}
+                    {d.label}
                   </button>
                 );
               })}
             </div>
 
-            {/* FILA CERO: EQUIPOS FIJADOS (PIN) */}
-            <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-gray-800/60 overflow-x-auto no-scrollbar">
-              <div className="flex items-center gap-1 text-[10px] font-bold text-amber-400 shrink-0 mr-1">
-                <Pin className="w-3 h-3" />
-                <span>FILA CERO:</span>
-              </div>
-
-              {QUICK_PIN_TEAMS.map((team) => {
-                const isPinned = pinnedTeams.includes(team.id);
+            {/* FAVORITOS / FILA CERO */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+              {FAVORITE_TEAMS.map((team) => {
+                const pinned = pinnedTeams.includes(team.id);
                 return (
                   <button
                     key={team.id}
                     onClick={() => {
-                      triggerHaptic('medium');
+                      triggerHaptic('light');
                       onTogglePinTeam(team.id);
                     }}
-                    className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold shrink-0 transition-all cursor-pointer border ${
-                      isPinned
-                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-                        : 'bg-[#141824]/90 text-gray-400 border-gray-800 hover:border-gray-700'
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap border transition-all cursor-pointer ${
+                      pinned
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/50'
+                        : 'bg-[#141824] text-gray-400 border-gray-800'
                     }`}
                   >
                     <img
                       src={team.logo}
                       alt={team.name}
                       className="w-3.5 h-3.5 object-contain"
-                      onError={(e) => {
-                        e.currentTarget.style.display = 'none';
-                      }}
                     />
                     <span>{team.name}</span>
-                    {isPinned && <span className="text-amber-400">📌</span>}
                   </button>
                 );
               })}
             </div>
           </>
         )}
-
       </div>
     </header>
   );

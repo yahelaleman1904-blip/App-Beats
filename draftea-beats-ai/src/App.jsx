@@ -255,7 +255,7 @@ export default function App() {
         globalAccuracy={globalAccuracy}
       />
 
-      <main className="max-w-md sm:max-w-4xl mx-auto px-3.5 pt-4">
+      <main className="max-w-4xl mx-auto px-2.5 sm:px-4 pt-3">
         {isLoading ? (
           <div className="text-center py-20">
             <span className="text-emerald-400 font-bold animate-pulse">

@@ -4,6 +4,22 @@ import { Globe, RotateCcw } from 'lucide-react';
 import { LEAGUES_CATALOG, FAVORITE_TEAMS } from '../data/leaguesData';
 import { triggerHaptic } from '../utils/haptics';
 
+// Escudos oficiales CDN ESPN garantizados para los equipos fijados
+const OFFICIAL_TEAM_LOGOS = {
+  BAR: 'https://a.espncdn.com/i/teamlogos/soccer/500/83.png',
+  RMA: 'https://a.espncdn.com/i/teamlogos/soccer/500/86.png',
+  BET: 'https://a.espncdn.com/i/teamlogos/soccer/500/244.png',
+  DOR: 'https://a.espncdn.com/i/teamlogos/soccer/500/124.png',
+  MCI: 'https://a.espncdn.com/i/teamlogos/soccer/500/382.png',
+  CAZ: 'https://a.espncdn.com/i/teamlogos/soccer/500/218.png',
+  AME: 'https://a.espncdn.com/i/teamlogos/soccer/500/227.png',
+  GDL: 'https://a.espncdn.com/i/teamlogos/soccer/500/219.png',
+  LIV: 'https://a.espncdn.com/i/teamlogos/soccer/500/364.png',
+  ARS: 'https://a.espncdn.com/i/teamlogos/soccer/500/359.png',
+  PSG: 'https://a.espncdn.com/i/teamlogos/soccer/500/160.png',
+  MUN: 'https://a.espncdn.com/i/teamlogos/soccer/500/132.png'
+};
+
 function buildDynamic7Days() {
   const dayNames = ['DOM', 'LUN', 'MAR', 'MIE', 'JUE', 'VIE', 'SAB'];
   const monthNames = ['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC'];
@@ -43,13 +59,22 @@ export default function TopHeaderAndFilters({
   const isAllDates = selectedDates.length === 0;
   const dynamicDays = useMemo(() => buildDynamic7Days(), []);
 
+  // PUNTO 4 CORREGIDO: Eliminar el elemento "ALL" / "TODAS" duplicado que venía dentro de LEAGUES_CATALOG
+  const cleanLeaguesCatalog = useMemo(() => {
+    return (LEAGUES_CATALOG || []).filter(
+      (lg) =>
+        lg.id !== 'ALL' &&
+        lg.short?.toUpperCase() !== 'TODAS' &&
+        lg.name?.toUpperCase() !== 'TODAS'
+    );
+  }, []);
+
   const accuracyLabel =
     globalAccuracy === 'En espera' ? 'SIN DATOS' : `${globalAccuracy}% HIT`;
 
   return (
     <header className="relative z-30 bg-[#0b0d13] border-b border-gray-800/80">
       <div className="max-w-4xl mx-auto px-3 pt-2.5 pb-2 space-y-2.5">
-        {/* BARRA SUPERIOR COMERCIAL */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center font-black text-white text-sm shadow">
@@ -90,7 +115,7 @@ export default function TopHeaderAndFilters({
 
         {(activeTab === 'stats' || activeTab === 'beats') && (
           <>
-            {/* CARRUSEL DE LIGAS COMPACTO */}
+            {/* CARRUSEL DE LIGAS SIN EL GLOBO DUPLICADO DE TODAS */}
             <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
               <button
                 onClick={() => {
@@ -117,7 +142,7 @@ export default function TopHeaderAndFilters({
                 </span>
               </button>
 
-              {LEAGUES_CATALOG.map((lg) => {
+              {cleanLeaguesCatalog.map((lg) => {
                 const isSelected = selectedLeagues.includes(lg.id);
                 return (
                   <button
@@ -177,10 +202,11 @@ export default function TopHeaderAndFilters({
               })}
             </div>
 
-            {/* FAVORITOS / FILA CERO */}
+            {/* PUNTO 3 CORREGIDO: ESCUDOS SIEMPRE VISIBLES EN FIJADOS */}
             <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
-              {FAVORITE_TEAMS.map((team) => {
+              {(FAVORITE_TEAMS || []).map((team) => {
                 const pinned = pinnedTeams.includes(team.id);
+                const validLogo = OFFICIAL_TEAM_LOGOS[team.id] || team.logo;
                 return (
                   <button
                     key={team.id}
@@ -195,9 +221,9 @@ export default function TopHeaderAndFilters({
                     }`}
                   >
                     <img
-                      src={team.logo}
+                      src={validLogo}
                       alt={team.name}
-                      className="w-3.5 h-3.5 object-contain"
+                      className="w-4 h-4 object-contain shrink-0"
                     />
                     <span>{team.name}</span>
                   </button>

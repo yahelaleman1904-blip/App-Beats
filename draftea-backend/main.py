@@ -593,6 +593,9 @@ async def parse_past_match_summary(
         home_formation = home_roster_obj.get("formation", "4-2-3-1") or "4-2-3-1"
         away_formation = away_roster_obj.get("formation", "4-3-3") or "4-3-3"
 
+        my_squad_table = home_squad_table if is_home_target else away_squad_table
+        opp_squad_table = away_squad_table if is_home_target else home_squad_table
+
         parsed_obj = {
             "id": str(event_id),
             "fullDate": date_mx,
@@ -621,6 +624,8 @@ async def parse_past_match_summary(
             "cards": cards,
             "teamLineupRows": home_rows if is_home_target else away_rows,
             "oppLineupRows": away_rows if is_home_target else home_rows,
+            "mySquad": my_squad_table,
+            "oppSquad": opp_squad_table,
             "squadTable": {
                 "home": home_squad_table,
                 "away": away_squad_table,
@@ -639,7 +644,6 @@ async def parse_past_match_summary(
             "_totalGoals": home_score + away_score,
             "_btts": 1 if (home_score > 0 and away_score > 0) else 0,
         }
-
         DEEP_CACHE[cache_key] = parsed_obj
         return parsed_obj
     except Exception:

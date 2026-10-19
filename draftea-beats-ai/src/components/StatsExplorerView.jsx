@@ -59,6 +59,34 @@ export default function StatsExplorerView({
       .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '')
       .trim();
 
+  // PUNTO 2 CORREGIDO: Extraer de un partido pasado ÚNICAMENTE la lista de jugadores del club buscado
+  // (y NUNCA los del otro rival contra el que jugó ese día, como STR)
+  const extractOnlyClubSquad = (pastMatchObj, clubName, clubShort) => {
+    if (!pastMatchObj) return [];
+    if (Array.isArray(pastMatchObj.mySquad) && pastMatchObj.mySquad.length > 0) {
+      return pastMatchObj.mySquad;
+    }
+    const sq = pastMatchObj.squadTable;
+    if (!sq) return [];
+
+    const cName = (clubName || '').toLowerCase();
+    const cShort = (clubShort || '').toLowerCase();
+    const pmHomeName = (pastMatchObj.homeName || '').toLowerCase();
+    const pmHomeAbbr = (pastMatchObj.homeAbbr || '').toLowerCase();
+
+    const wasHomeInThatGame =
+      pmHomeAbbr === cShort ||
+      pmHomeName.includes(cName.slice(0, 5)) ||
+      cName.includes(pmHomeName.slice(0, 5));
+
+    const candidateList = wasHomeInThatGame ? sq.home || [] : sq.away || [];
+    // Doble filtro de seguridad por siglas del equipo
+    const strictFiltered = ( sq.all || candidateList ).filter(
+      (p) => (p.team || '').toLowerCase() === cShort
+    );
+    return strictFiltered.length > 0 ? strictFiltered : candidateList;
+  };
+
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between px-1">
@@ -88,19 +116,29 @@ export default function StatsExplorerView({
           return true;
         });
 
-        const activeSquadTable =
-          selectedPastMatch?.squadTable ||
-          confirmedLineup?.squadTable ||
-          (recentHome[0]?.squadTable && recentAway[0]?.squadTable
-            ? {
-                home: recentHome[0].squadTable.home,
-                away: recentAway[0].squadTable.home,
-                all: [
-                  ...(recentHome[0].squadTable.home || []),
-                  ...(recentAway[0].squadTable.home || [])
-                ].sort((a, b) => b.rating - a.rating)
-              }
-            : recentHome[0]?.squadTable || null);
+        // PUNTO 2 CORREGIDO: En "Convocados" del partido solo deben estar los jugadores de match.homeTeam y match.awayTeam
+        const homeOnlySquad = extractOnlyClubSquad(
+          recentHome[0],
+          match.homeTeam.name,
+          match.homeTeam.short
+        );
+        const awayOnlySquad = extractOnlyClubSquad(
+          recentAway[0],
+          match.awayTeam.name,
+          match.awayTeam.short
+        );
+
+        const activeSquadTable = confirmedLineup?.squadTable
+          ? confirmedLineup.squadTable
+          : homeOnlySquad.length > 0 || awayOnlySquad.length > 0
+          ? {
+              home: homeOnlySquad,
+              away: awayOnlySquad,
+              all: [...homeOnlySquad, ...awayOnlySquad].sort(
+                (a, b) => (b.rating || 0) - (a.rating || 0)
+              )
+            }
+          : null;
 
         return (
           <div
@@ -197,7 +235,6 @@ export default function StatsExplorerView({
             {/* CONTENIDO DESPLEGABLE */}
             {isExpanded && (
               <div className="border-t border-gray-800 bg-[#0e121b] p-3 space-y-3">
-                {/* PESTAÑAS SOLO CON TÍTULOS */}
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
                   {[
                     { id: 'general', label: 'General' },
@@ -270,7 +307,6 @@ export default function StatsExplorerView({
                           </div>
                         )}
 
-                        {/* JUGADORES CLAVE */}
                         <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2.5">
                           <div className="flex items-center justify-between">
                             <h4 className="text-[11px] font-extrabold text-white uppercase">
@@ -409,7 +445,6 @@ export default function StatsExplorerView({
                           </div>
                         </div>
 
-                        {/* PORTEROS EN 2 COLUMNAS INCLUSO EN MÓVIL */}
                         {goalkeepers.length > 0 && (
                           <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2">
                             <h4 className="text-[11px] font-extrabold text-sky-400 uppercase">
@@ -519,7 +554,7 @@ export default function StatsExplorerView({
                       </div>
                     )}
 
-                    {/* CONVOCADOS */}
+                    {/* CONVOCADOS (SOLO JUGADORES DE LOS 2 EQUIPOS QUE JUEGAN) */}
                     {activeSubTab === 'squad' && (
                       <SquadConvocadosTable
                         squadTable={activeSquadTable}
@@ -611,7 +646,7 @@ export default function StatsExplorerView({
                       </div>
                     )}
 
-                    {/* ÚLTIMOS 5 PARTIDOS */}
+                    {/* PUNTO 1 CORREGIDO: ÚLTIMOS 5 PARTIDOS SIN LA TABLA DE CONVOCADOS ABAJO */}
                     {activeSubTab === 'last5' && (
                       <div className="space-y-3">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -783,13 +818,6 @@ export default function StatsExplorerView({
                                 ))}
                               </div>
                             </div>
-
-                            <SquadConvocadosTable
-                              squadTable={selectedPastMatch.squadTable}
-                              homeName={selectedPastMatch.homeName}
-                              awayName={selectedPastMatch.awayName}
-                              onSelectPlayer={setModalPlayer}
-                            />
                           </div>
                         )}
                       </div>

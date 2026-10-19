@@ -361,11 +361,15 @@ export default function ClubSearchView({ allMatches }) {
                 </div>
               )}
 
-              {activeClubTab === 'squad' && (
+{activeClubTab === 'squad' && (
                 <SquadConvocadosTable
-                  squadTable={inspectedMatch.squadTable}
-                  homeName={inspectedMatch.homeName}
-                  awayName={inspectedMatch.awayName}
+                  squadTable={{
+                    home: inspectedMatch.mySquad || inspectedMatch.squadTable?.home || [],
+                    away: inspectedMatch.oppSquad || inspectedMatch.squadTable?.away || [],
+                    all: inspectedMatch.mySquad || inspectedMatch.squadTable?.all || []
+                  }}
+                  homeName={selectedClub.name}
+                  awayName="Rival de ese partido"
                   onSelectPlayer={setModalPlayer}
                 />
               )}

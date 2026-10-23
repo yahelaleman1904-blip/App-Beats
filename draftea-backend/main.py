@@ -873,6 +873,20 @@ async def get_club_full_profile(team_id: str, league_slug: str = "esp.1", team_n
     }
 
 
+# En draftea-backend/main.py, reemplaza toda la función @app.get("/api/match-deep-stats") por esta:
+
+def american_to_decimal_odd(am_val, fallback=1.35):
+    try:
+        v = float(str(am_val).replace("+", "").strip())
+        if v == 0:
+            return fallback
+        if v > 0:
+            return round(1.0 + (v / 100.0), 2)
+        return round(1.0 + (100.0 / abs(v)), 2)
+    except Exception:
+        return fallback
+
+
 @app.get("/api/match-deep-stats")
 async def get_match_deep_stats(
     league_slug: str,
@@ -888,13 +902,53 @@ async def get_match_deep_stats(
             fetch_team_last_5(client, league_slug, away_id)
         )
 
-        confirmed_lineup = {"confirmed": False, "homeFormation": None, "awayFormation": None, "homeRows": [], "awayRows": [], "squadTable": None}
+        confirmed_lineup = {
+            "confirmed": False,
+            "homeFormation": None,
+            "awayFormation": None,
+            "homeRows": [],
+            "awayRows": [],
+            "squadTable": None
+        }
+        bookmaker_odds = {
+            "homeWinOdd": None,
+            "drawOdd": None,
+            "awayWinOdd": None,
+            "overUnderLine": None,
+            "overOdd": None,
+            "underOdd": None
+        }
+
         if event_id:
             try:
                 ev_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}"
                 ev_resp = await client.get(ev_url, headers=HEADERS)
                 if ev_resp.status_code == 200:
                     ev_data = ev_resp.json()
+
+                    # 1. Extraer momios oficiales de las casas de apuestas (pickcenter / odds)
+                    pickcenter = ev_data.get("pickcenter", []) or ev_data.get("odds", [])
+                    if pickcenter and len(pickcenter) > 0:
+                        pc = pickcenter[0]
+                        ou_line = safe_float(pc.get("overUnder"), 0.0)
+                        if ou_line > 0:
+                            bookmaker_odds["overUnderLine"] = ou_line
+                        if pc.get("overOdds"):
+                            bookmaker_odds["overOdd"] = american_to_decimal_odd(pc.get("overOdds"), 1.85)
+                        if pc.get("underOdds"):
+                            bookmaker_odds["underOdd"] = american_to_decimal_odd(pc.get("underOdds"), 1.85)
+
+                        h_ml = pc.get("homeTeamOdds", {}).get("moneyLine")
+                        a_ml = pc.get("awayTeamOdds", {}).get("moneyLine")
+                        d_ml = pc.get("drawOdds", {}).get("moneyLine")
+                        if h_ml is not None:
+                            bookmaker_odds["homeWinOdd"] = american_to_decimal_odd(h_ml, 1.65)
+                        if a_ml is not None:
+                            bookmaker_odds["awayWinOdd"] = american_to_decimal_odd(a_ml, 3.80)
+                        if d_ml is not None:
+                            bookmaker_odds["drawOdd"] = american_to_decimal_odd(d_ml, 4.20)
+
+                    # 2. Verificar si ya hay alineación confirmada
                     rosters = ev_data.get("rosters", [])
                     if len(rosters) >= 2 and rosters[0].get("roster") and rosters[1].get("roster"):
                         h_rows, h_sq = build_pitch_and_squad_from_roster(rosters[0].get("roster", []), home_abbr, "", [])
@@ -921,6 +975,8 @@ async def get_match_deep_stats(
     over05 = round(sum(1 for m in combined_matches if m["_totalGoals"] >= 1) / total_m * 100)
     over15 = round(sum(1 for m in combined_matches if m["_totalGoals"] >= 2) / total_m * 100)
     over25 = round(sum(1 for m in combined_matches if m["_totalGoals"] >= 3) / total_m * 100)
+    under35_prob = round(sum(1 for m in combined_matches if m["_totalGoals"] <= 3) / total_m * 100)
+    under45_prob = round(sum(1 for m in combined_matches if m["_totalGoals"] <= 4) / total_m * 100)
     btts = round(sum(m["_btts"] for m in combined_matches) / total_m * 100)
 
     h_count = max(1, len(home_last5))
@@ -937,14 +993,12 @@ async def get_match_deep_stats(
     home_cards_avg = round(sum(m.get("_myCards", 0) for m in home_last5) / h_count, 1)
     away_cards_avg = round(sum(m.get("_myCards", 0) for m in away_last5) / a_count, 1)
 
-
-    # 1. CÁLCULO REAL DE QUIÉN METE EL PRIMER GOL DEL PARTIDO
+    # Cálculo de 1er Gol y Porcentaje de Victoria
     home_scored_first_rate = round(sum(m.get("_scoredFirst", 0) for m in home_last5) / h_count * 100)
     away_scored_first_rate = round(sum(m.get("_scoredFirst", 0) for m in away_last5) / a_count * 100)
     home_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in home_last5) / h_count * 100)
     away_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in away_last5) / a_count * 100)
 
-    # Probabilidad combinada de abrir el marcador (cruza cuántas veces anota primero el local vs cuántas veces recibe primero el visitante)
     raw_home_first_goal = round((home_scored_first_rate * 0.6) + (away_conceded_first_rate * 0.4))
     raw_away_first_goal = round((away_scored_first_rate * 0.6) + (home_conceded_first_rate * 0.4))
     total_fg = max(1, raw_home_first_goal + raw_away_first_goal)
@@ -952,7 +1006,6 @@ async def get_match_deep_stats(
     away_first_goal_prob = min(82, max(15, round((raw_away_first_goal / total_fg) * 92)))
     no_goal_prob = max(2, 100 - home_first_goal_prob - away_first_goal_prob)
 
-    # 2. PORCENTAJE DE VICTORIA SUPER CONFIABLE (Pondera Resultados L5 + Factor Local/Visita + Diferencial de Goles y Tiros al Arco)
     home_wins = sum(1 for m in home_last5 if m["result"] == "W")
     home_draws = sum(1 for m in home_last5 if m["result"] == "D")
     away_wins = sum(1 for m in away_last5 if m["result"] == "W")
@@ -964,7 +1017,7 @@ async def get_match_deep_stats(
         + ((away_losses / a_count) * 25)
         + (min(20, max(0, (home_goals_avg - away_goals_avg + 1.2) * 8)))
         + (min(10, max(0, (home_sot_avg - away_sot_avg + 1.5) * 2.5)))
-        + 6  # Bono táctico de localía
+        + 6
     )
     away_strength = (
         ((away_wins / a_count) * 45)
@@ -979,13 +1032,46 @@ async def get_match_deep_stats(
     win_prob_away = round((away_strength / total_str) * 100)
     win_prob_draw = max(10, 100 - win_prob_home - win_prob_away)
 
-    # 3. CALIBRADOR DE MERCADOS Y MOMIOS DISPONIBLES EN DRAFTEA
-    # En Draftea, si el promedio de goles esperados del partido es >= 2.0 o Over 1.5 >= 65%,
-    # la línea "+0.5 Goles" está cerrada/bloqueada y la línea base abierta es "+1.5 Goles" y "-3.5 Goles".
+    # =========================================================================
+    # MOTOR DE REGLAS EXACTAS DE APERTURA Y CANDADOS DE DRAFTEA (DAF 12 y DAF 13)
+    # =========================================================================
     expected_total_goals = round(home_goals_avg + away_goals_avg, 2)
-    draftea_min_goal_line = 1.5 if (expected_total_goals >= 1.85 or over15 >= 62) else 0.5
-    draftea_under_safe_line = 3.5 if expected_total_goals <= 3.1 else 4.5
-    under35_prob = round(sum(1 for m in combined_matches if m["_totalGoals"] <= 3) / total_m * 100)
+
+    # 1. Goles Totales: Si ambos equipos promedian >= 2.7 goles combinados o Over 2.5 >= 65%
+    # (ej. Barcelona vs Real Madrid), Draftea BLOQUEA ↑ 1.5 con candado y solo abre desde ↑ 2.5
+    is_over15_locked_in_draftea = (
+        expected_total_goals >= 2.75
+        or over25 >= 65
+        or (bookmaker_odds["overUnderLine"] and bookmaker_odds["overUnderLine"] >= 3.25)
+    )
+    draftea_min_goal_line = 2.5 if is_over15_locked_in_draftea else 1.5
+    draftea_under_safe_line = 3.5 if expected_total_goals <= 3.0 else 4.5
+
+    # 2. Total de Goles por Equipo (como en DAF 12: Total de goles Barcelona 1.5 / 2.5 y Real Madrid 0.5 / 1.5)
+    draftea_home_team_goal_line = 1.5 if home_goals_avg >= 1.65 else 0.5
+    draftea_away_team_goal_line = 1.5 if away_goals_avg >= 1.65 else 0.5
+    home_team_over_hits = sum(
+        1 for m in home_last5 if m["_myGoals"] > draftea_home_team_goal_line
+    )
+    away_team_over_hits = sum(
+        1 for m in away_last5 if m["_myGoals"] > draftea_away_team_goal_line
+    )
+
+    # 3. Total de Tiros al Arco de Equipo (En DAF 12: Barcelona empieza en 7.0+ (1.42x) y Real Madrid en 5.0+ (1.69x))
+    # En Draftea NUNCA hay tope en 5: la primera línea desbloqueada es round(promedio_sot_L5 - 0.3)
+    draftea_home_sot_open_line = max(3, int(round(home_sot_avg - 0.25)))
+    draftea_away_sot_open_line = max(3, int(round(away_sot_avg - 0.25)))
+    draftea_home_shots_open_line = max(9, int(round(home_shots_avg - 1.2)))
+    draftea_away_shots_open_line = max(8, int(round(away_shots_avg - 1.2)))
+
+    # Momios reales estilo Draftea
+    ml_home_odd = bookmaker_odds["homeWinOdd"] or round(max(1.32, min(4.50, 100 / max(22, win_prob_home) * 0.92)), 2)
+    ml_away_odd = bookmaker_odds["awayWinOdd"] or round(max(1.45, min(5.50, 100 / max(18, win_prob_away) * 0.92)), 2)
+    # Pago Anticipado por 1 gol PA(1) (En DAF12: FCB Money Line = 1.60x -> PA(1) = 1.25x; RMA = 3.99x -> PA(1) = 1.89x)
+    pa1_home_odd = round(max(1.18, 1.0 + (ml_home_odd - 1.0) * 0.42), 2)
+    pa1_away_odd = round(max(1.25, 1.0 + (ml_away_odd - 1.0) * 0.30), 2)
+    dc_home_draw_odd = round(max(1.18, 1.0 + (ml_home_odd - 1.0) * 0.38), 2)
+    dc_away_draw_odd = round(max(1.24, 1.0 + (ml_away_odd - 1.0) * 0.38), 2)
 
     agg_players, agg_gks = {}, {}
 
@@ -1063,22 +1149,10 @@ async def get_match_deep_stats(
     home_tactics = analyze_team_tactical_style(home_last5, home_abbr, is_home=True)
     away_tactics = analyze_team_tactical_style(away_last5, away_abbr, is_home=False)
 
-    if home_tactics["parkTheBusRisk"] or away_tactics["parkTheBusRisk"]:
-        match_script = (
-            f"⚠️ Partido de Cerrojo Táctico: Uno de los equipos suele anotar 1 gol y encerrarse "
-            f"(Over 2.5 solo en {over25}%). Se recomienda priorizar Tiros al Arco de jugador (1.0+), "
-            f"Atajadas de Portero o Goles ↑ 0.5 / ↑ 1.5."
-        )
-    elif over25 >= 65 or home_tactics["isScoringMachine"] or away_tactics["isScoringMachine"]:
-        match_script = (
-            f"🔥 Partido Abierto de Ida y Vuelta: {over25}% de cumplimiento en +2.5 goles y alto volumen de llegadas "
-            f"({home_sot_avg} vs {away_sot_avg} tiros al arco). Ideal para Goles ↑ 1.5 / ↑ 2.5 y Tiradores Titulares."
-        )
-    else:
-        match_script = (
-            f"⚖️ Duelo Equilibrado ({over15}% en +1.5 goles): Localía de {home_abbr} con {home_shots_avg} tiros/juego "
-            f"frente a {away_abbr} con {away_shots_avg} tiros/juego."
-        )
+    match_script = (
+        f"Líneas Oficiales Draftea: Goles Totales desde ↑ {draftea_min_goal_line} • "
+        f"Tiros al Arco {home_abbr} desde {draftea_home_sot_open_line}.0+ vs {away_abbr} desde {draftea_away_sot_open_line}.0+."
+    )
 
     sorted_shooters = sorted(
         agg_players.values(),
@@ -1093,15 +1167,35 @@ async def get_match_deep_stats(
         avg_sot = round(sh["sot"] / gms, 1)
         is_rot = sh["subIns"] >= 2 or sh["starts"] < (gms / 2)
 
-        games_with_sot = sum(1 for log in sh["matchLogs"] if log["sot"] >= 1)
-        real_sot_hit_rate = round((games_with_sot / gms) * 100)
+        # =====================================================================
+        # REGLA EXACTA DE DRAFTEA PARA JUGADORES (COMO A. GORDON EN DAF 13.jpeg)
+        # =====================================================================
+        # En DAF 13: Gordon tiene Prom. últimos 5 partidos = 3.6 tiros.
+        # Draftea bloquea 1.0+ (1.01x) y 2.0+ (1.10x) y abre la línea en 3.0+ (1.36x).
+        if avg_sh >= 3.1:
+            open_shots_line = max(3, int(avg_sh))  # Ej: 3.6 -> 3.0+ Tiros
+            open_shots_odd = 1.36 if open_shots_line == 3 else 1.45
+        elif avg_sh >= 1.9:
+            open_shots_line = 2
+            open_shots_odd = 1.34
+        else:
+            open_shots_line = 1
+            open_shots_odd = 1.28
 
-        venue_factor = "LOCAL" if sh["isHome"] else "VISITANTE"
-        rot_note = (
-            f"⚠️ Rotación ({venue_factor}): Suplente en {sh['subIns']}/{gms} juegos."
-            if is_rot
-            else f"✅ Titular {sh['starts']}/{gms} • {venue_factor} • 1+ al arco en {games_with_sot}/{gms} juegos."
-        )
+        # En Tiros al Arco B+: Si el jugador promedia >= 1.85 tiros al arco (ej. Mbappé / Haaland),
+        # Draftea suele poner 1.0+ muy bajo (~1.14x) o abrir valor en 2.0+ (~1.42x)
+        if avg_sot >= 1.95:
+            open_sot_line = 2
+            open_sot_odd = 1.44
+        else:
+            open_sot_line = 1
+            open_sot_odd = 1.30 if avg_sot >= 1.2 else 1.42
+
+        games_hitting_open_sot = sum(1 for log in sh["matchLogs"] if log["sot"] >= open_sot_line)
+        games_hitting_open_shots = sum(1 for log in sh["matchLogs"] if log["shots"] >= open_shots_line)
+
+        sot_hit_rate = round((games_hitting_open_sot / gms) * 100)
+        shots_hit_rate = round((games_hitting_open_shots / gms) * 100)
 
         base_rt = 6.8 + (sh["goals"] * 0.35) + (sh["assists"] * 0.25) + (avg_sot * 0.3)
         rating_l5 = round(min(9.6, max(6.1, base_rt)), 1)
@@ -1122,14 +1216,22 @@ async def get_match_deep_stats(
             "avgShots": avg_sh,
             "avgSoT": avg_sot,
             "xG": round(avg_sot * 0.32 + (sh["goals"] * 0.15), 2),
-            "l10HitRate": max(65, min(96, real_sot_hit_rate if real_sot_hit_rate > 0 else 75)),
-            "propLine": "1.0+ Tiros al Arco" if avg_sot >= 0.7 else "2.0+ Tiros Totales",
-            "odd": 1.35 if avg_sot >= 1.3 else 1.48,
+            "openSoTLine": open_sot_line,
+            "openSoTOdd": open_sot_odd,
+            "openSoTHitsL5": games_hitting_open_sot,
+            "openSoTHitRate": max(55, min(96, sot_hit_rate if sot_hit_rate > 0 else 75)),
+            "openShotsLine": open_shots_line,
+            "openShotsOdd": open_shots_odd,
+            "openShotsHitsL5": games_hitting_open_shots,
+            "openShotsHitRate": max(55, min(96, shots_hit_rate if shots_hit_rate > 0 else 78)),
+            "l10HitRate": max(65, min(96, max(sot_hit_rate, shots_hit_rate))),
+            "propLine": f"{open_sot_line}.0+ Tiros al Arco" if sot_hit_rate >= shots_hit_rate else f"{open_shots_line}.0+ Tiros",
+            "odd": open_sot_odd if sot_hit_rate >= shots_hit_rate else open_shots_odd,
             "rotationStatus": "ROTACION" if is_rot else "TITULAR",
             "startsLast5": sh["starts"],
             "gamesLast5": gms,
             "avgMinutes": 32 if is_rot else 86,
-            "rotationNote": rot_note,
+            "rotationNote": f"Titular {sh['starts']}/{gms} • Línea abierta en Draftea: {open_shots_line}.0+ Tiros ({games_hitting_open_shots}/{gms} verdes)",
             "matchLogs": sh["matchLogs"]
         })
 
@@ -1137,6 +1239,7 @@ async def get_match_deep_stats(
     for gk in sorted(agg_gks.values(), key=lambda x: x["saves"], reverse=True)[:4]:
         gms = max(1, gk["games"])
         avg_sv = round(gk["saves"] / gms, 1)
+        open_gk_line = max(2, int(round(avg_sv - 0.2)))
         goalkeepers_list.append({
             "name": gk["name"],
             "team": gk["team"],
@@ -1144,8 +1247,9 @@ async def get_match_deep_stats(
             "totalSaves": gk["saves"],
             "avgSaves": avg_sv,
             "conceded": gk["conceded"],
-            "propLine": f"{max(2, round(avg_sv))}.0+ Atajadas",
-            "odd": 1.42,
+            "openSavesLine": open_gk_line,
+            "propLine": f"{open_gk_line}.0+ Atajadas",
+            "odd": 1.38 if open_gk_line <= 2 else 1.48,
             "matchLogs": gk["matchLogs"]
         })
 
@@ -1158,11 +1262,12 @@ async def get_match_deep_stats(
             "away": away_tactics,
             "matchScript": match_script
         },
-            "statsL10": {
+        "statsL10": {
             "over05Goals": over05,
             "over15Goals": over15,
             "over25Goals": over25,
             "under35Goals": under35_prob,
+            "under45Goals": under45_prob,
             "btts": btts,
             "homeGoalsAvg": home_goals_avg,
             "awayGoalsAvg": away_goals_avg,
@@ -1175,7 +1280,6 @@ async def get_match_deep_stats(
             "homeCardsAvg": home_cards_avg,
             "awayCardsAvg": away_cards_avg,
             "cornersAvg": round(home_corners_avg + away_corners_avg, 1),
-            # Nuevos indicadores de Victoria Local/Visita, Primer Gol y Líneas Oficiales Draftea:
             "winProbHome": win_prob_home,
             "winProbDraw": win_prob_draw,
             "winProbAway": win_prob_away,
@@ -1184,8 +1288,24 @@ async def get_match_deep_stats(
             "noGoalProb": no_goal_prob,
             "homeScoredFirstRate": home_scored_first_rate,
             "awayScoredFirstRate": away_scored_first_rate,
+            # Reglas y Momios exactos de Draftea:
+            "isOver15Locked": is_over15_locked_in_draftea,
             "drafteaMinGoalLine": draftea_min_goal_line,
             "drafteaUnderSafeLine": draftea_under_safe_line,
+            "drafteaHomeTeamGoalLine": draftea_home_team_goal_line,
+            "drafteaAwayTeamGoalLine": draftea_away_team_goal_line,
+            "homeTeamOverHits": home_team_over_hits,
+            "awayTeamOverHits": away_team_over_hits,
+            "drafteaHomeSoTOpenLine": draftea_home_sot_open_line,
+            "drafteaAwaySoTOpenLine": draftea_away_sot_open_line,
+            "drafteaHomeShotsOpenLine": draftea_home_shots_open_line,
+            "drafteaAwayShotsOpenLine": draftea_away_shots_open_line,
+            "mlHomeOdd": ml_home_odd,
+            "mlAwayOdd": ml_away_odd,
+            "pa1HomeOdd": pa1_home_odd,
+            "pa1AwayOdd": pa1_away_odd,
+            "dcHomeDrawOdd": dc_home_draw_odd,
+            "dcAwayDrawOdd": dc_away_draw_odd,
             "expectedTotalGoals": expected_total_goals
         },
         "keyPlayers": key_players_list,

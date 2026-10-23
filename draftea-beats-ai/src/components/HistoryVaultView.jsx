@@ -20,7 +20,7 @@ export default function HistoryVaultView({
   onToggleArchiveTicket,
   onAutoVerifyTickets,
   isVerifying,
-  learningLogs,
+  learningLogs = [],
   onAddCustomLearningRule
 }) {
   const [expandedTicketId, setExpandedTicketId] = useState(null);
@@ -145,7 +145,7 @@ export default function HistoryVaultView({
 
   return (
     <div className="space-y-3">
-      {/* 1. TABLERO DE EFECTIVIDAD EN 3 COLUMNAS HORIZONTALES (MÓVIL Y PC) */}
+      {/* 1. TABLERO DE EFECTIVIDAD EN 3 COLUMNAS HORIZONTALES */}
       <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3 space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-xs font-extrabold uppercase tracking-wider text-purple-400">
@@ -167,6 +167,7 @@ export default function HistoryVaultView({
             </label>
 
             <button
+              type="button"
               onClick={() => {
                 triggerHaptic('medium');
                 if (onAutoVerifyTickets) onAutoVerifyTickets();
@@ -186,7 +187,6 @@ export default function HistoryVaultView({
           </div>
         )}
 
-        {/* 3 COLUMNAS SIEMPRE HORIZONTALES */}
         <div className="grid grid-cols-3 gap-2">
           {[
             { key: 'SEGURO', title: 'Seguros' },
@@ -229,7 +229,7 @@ export default function HistoryVaultView({
         </div>
       </div>
 
-      {/* 2. FILTROS DE TICKETS */}
+      {/* 2. FILTROS DE ENTRADAS */}
       <div className="flex items-center justify-between flex-wrap gap-2 bg-[#141824] border border-gray-800 rounded-xl p-2.5">
         <span className="text-xs font-extrabold text-gray-300 uppercase">
           ENTRADAS ({visibleTickets.length})
@@ -244,6 +244,7 @@ export default function HistoryVaultView({
           ].map((f) => (
             <button
               key={f.id}
+              type="button"
               onClick={() => {
                 triggerHaptic('light');
                 setFilterCategory(f.id);
@@ -260,6 +261,7 @@ export default function HistoryVaultView({
 
           {hiddenCount > 0 && (
             <button
+              type="button"
               onClick={() => setShowArchived((p) => !p)}
               className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-extrabold bg-gray-800 text-gray-300 border border-gray-700 cursor-pointer"
             >
@@ -353,6 +355,7 @@ export default function HistoryVaultView({
                   </div>
 
                   <button
+                    type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       triggerHaptic('light');
@@ -417,6 +420,19 @@ export default function HistoryVaultView({
                           {grp.legs.map((leg) => {
                             const isPending = leg.hit === null || leg.hit === undefined;
                             const isHit = leg.hit === true;
+                            const marketUpper = (leg.market || '').toUpperCase();
+
+                            // Detección de mercados binarios (Sí/No) para omitir la barra y contador numérico
+                            const isBinary =
+                              Boolean(leg.isBinaryMarket) ||
+                              marketUpper.includes('1ER GOL') ||
+                              marketUpper.includes('PRIMER GOL') ||
+                              marketUpper.includes('DOBLE OPORTUNIDAD') ||
+                              marketUpper.includes('MONEY LINE') ||
+                              marketUpper.includes('GANA PA') ||
+                              marketUpper.includes('AMBOS EQUIPOS ANOTAN') ||
+                              marketUpper.includes('HÁNDICAP');
+
                             const actual =
                               leg.actualValue ?? (isHit ? Math.ceil(leg.targetValue || 2) : 0);
                             const target = leg.targetValue || 1.5;
@@ -474,7 +490,7 @@ export default function HistoryVaultView({
                                   </div>
                                 </div>
 
-                                {!isPending && (
+                                {!isPending && !isBinary && (
                                   <div className="mt-1.5 relative flex items-center">
                                     <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
                                       <div
@@ -509,7 +525,7 @@ export default function HistoryVaultView({
         })}
       </div>
 
-      {/* 4. REGLAS ACTIVAS COMPACTAS Y SIN EMOJIS */}
+      {/* 4. REGLAS ACTIVAS */}
       <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3 space-y-2">
         <h3 className="text-[11px] font-extrabold text-purple-400 uppercase tracking-wider">
           REGLAS DE AJUSTE ({learningLogs.length})

@@ -1514,6 +1514,8 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
     }
 
 
+# En draftea-backend/main.py, reemplaza toda la función @app.post("/api/verify-tickets") por esta:
+
 @app.post("/api/verify-tickets")
 async def auto_verify_tickets(payload: dict):
     tickets = payload.get("tickets", [])
@@ -1528,13 +1530,27 @@ async def auto_verify_tickets(payload: dict):
                 if not match_id or not match_id.isdigit():
                     continue
 
-                url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={match_id}"
-                try:
-                    resp = await client.get(url, headers=HEADERS)
-                    if resp.status_code != 200:
-                        continue
-                    data = resp.json()
+                urls_to_try = [
+                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={match_id}",
+                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={match_id}"
+                ]
 
+                data = None
+                for url in urls_to_try:
+                    try:
+                        resp = await client.get(url, headers=HEADERS)
+                        if resp.status_code == 200:
+                            cand = resp.json()
+                            if cand.get("header"):
+                                data = cand
+                                break
+                    except Exception:
+                        continue
+
+                if not data:
+                    continue
+
+                try:
                     header_comp = data.get("header", {}).get("competitions", [{}])[0]
                     st_type = header_comp.get("status", {}).get("type", {})
                     state = st_type.get("state", "").lower()
@@ -1556,6 +1572,11 @@ async def auto_verify_tickets(payload: dict):
                     home_abbr = home_c.get("team", {}).get("abbreviation", "")
                     away_abbr = away_c.get("team", {}).get("abbreviation", "")
 
+                    home_norm = normalize_text(home_name)
+                    away_norm = normalize_text(away_name)
+                    home_abbr_norm = normalize_text(home_abbr)
+                    away_abbr_norm = normalize_text(away_abbr)
+
                     date_mx, time_mx = convert_utc_to_mexico(header_comp.get("date", ""))
                     if completed or state == "post":
                         status_label = "Final"
@@ -1563,7 +1584,7 @@ async def auto_verify_tickets(payload: dict):
                         clock_disp = header_comp.get("status", {}).get("displayClock", "En Vivo")
                         status_label = f"En Vivo • {clock_disp}"
                     else:
-                        status_label = f"{date_mx} • {time_mx} (Hora CDMX)"
+                        status_label = f"{date_mx} • {time_mx}"
 
                     leg["liveScore"] = {
                         "homeScore": home_score,
@@ -1575,6 +1596,47 @@ async def auto_verify_tickets(payload: dict):
                     if not (completed or state == "post"):
                         continue
 
+                    # 1. Extraer rosters y mapear cada jugador a su equipo (Home o Away)
+                    rosters = data.get("rosters", [])
+                    all_roster_players = []
+                    home_roster_shots, away_roster_shots = 0, 0
+                    home_roster_sot, away_roster_sot = 0, 0
+                    player_to_side = {}  # nombre_normalizado -> 'HOME' | 'AWAY'
+
+                    for r_idx, r_obj in enumerate(rosters[:2]):
+                        r_tid = str(r_obj.get("team", {}).get("id", ""))
+                        is_home_r = (r_tid == home_id_str) if r_tid else (r_idx == 0)
+                        side_tag = "HOME" if is_home_r else "AWAY"
+
+                        for p in r_obj.get("roster", []):
+                            ath = p.get("athlete", {})
+                            p_st = extract_player_stats_from_entry(p)
+                            if is_home_r:
+                                home_roster_shots += p_st["shots"]
+                                home_roster_sot += p_st["sot"]
+                            else:
+                                away_roster_shots += p_st["shots"]
+                                away_roster_sot += p_st["sot"]
+
+                            n_full = normalize_text(ath.get("displayName", ""))
+                            n_short = normalize_text(ath.get("shortName", ""))
+                            if n_full:
+                                player_to_side[n_full] = side_tag
+                            if n_short:
+                                player_to_side[n_short] = side_tag
+
+                            all_roster_players.append({
+                                "name": ath.get("displayName", ""),
+                                "shortName": ath.get("shortName", ""),
+                                "normName": n_full,
+                                "normShort": n_short,
+                                "starter": bool(p.get("starter", False)),
+                                "subbedIn": bool(p.get("subbedIn", False)),
+                                **p_st
+                            })
+
+                    # 2. Extraer estadísticas de boxscore.teams y tomar el MÁXIMO real entre boxscore y suma de jugadores
+                    # (Esto corrige casos como Nice donde boxscore reporta parcial pero la suma oficial es 4 tiros al arco)
                     box_teams = data.get("boxscore", {}).get("teams", [])
                     home_box_obj, away_box_obj = {}, {}
                     for bt in box_teams:
@@ -1591,95 +1653,205 @@ async def auto_verify_tickets(payload: dict):
                     h_official = extract_official_team_stats_from_boxscore(home_box_obj)
                     a_official = extract_official_team_stats_from_boxscore(away_box_obj)
 
-                    rosters = data.get("rosters", [])
-                    all_roster_players = []
-                    home_roster_shots, away_roster_shots = 0, 0
-                    home_roster_sot, away_roster_sot = 0, 0
-
-                    for r_obj in rosters:
-                        r_tid = str(r_obj.get("team", {}).get("id", ""))
-                        is_home_r = (r_tid == home_id_str)
-                        for p in r_obj.get("roster", []):
-                            ath = p.get("athlete", {})
-                            p_st = extract_player_stats_from_entry(p)
-                            if is_home_r:
-                                home_roster_shots += p_st["shots"]
-                                home_roster_sot += p_st["sot"]
-                            else:
-                                away_roster_shots += p_st["shots"]
-                                away_roster_sot += p_st["sot"]
-
-                            all_roster_players.append({
-                                "name": ath.get("displayName", ""),
-                                "shortName": ath.get("shortName", ""),
-                                "normName": normalize_text(ath.get("displayName", "")),
-                                "normShort": normalize_text(ath.get("shortName", "")),
-                                "starter": bool(p.get("starter", False)),
-                                "subbedIn": bool(p.get("subbedIn", False)),
-                                **p_st
-                            })
-
-                    home_shots = h_official["shots"] if h_official["shots"] > 0 else home_roster_shots
-                    away_shots = a_official["shots"] if a_official["shots"] > 0 else away_roster_shots
-                    home_sot = h_official["sot"] if h_official["sot"] > 0 else home_roster_sot
-                    away_sot = a_official["sot"] if a_official["sot"] > 0 else away_roster_sot
+                    home_shots = max(h_official["shots"], home_roster_shots, home_score)
+                    away_shots = max(a_official["shots"], away_roster_shots, away_score)
+                    home_sot = max(h_official["sot"], home_roster_sot, home_score)
+                    away_sot = max(a_official["sot"], away_roster_sot, away_score)
 
                     total_corners = h_official["corners"] + a_official["corners"]
                     total_cards = h_official["cards"] + a_official["cards"]
 
+                    # 3. Reconstruir la línea de tiempo EXACTA de los goles para:
+                    #    - Saber quién anotó el 1ER GOL DEL PARTIDO
+                    #    - Saber si un equipo tomó ventaja de 1 gol (PA(1)) o 2 goles (PA) en cualquier momento
+                    goal_timeline = []  # Lista de 'HOME' o 'AWAY' en orden cronológico
+                    for ev in data.get("keyEvents", []):
+                        ev_type = ev.get("type", {}).get("text", "").lower()
+                        if "goal" in ev_type or "penalty - scored" in ev_type or "own goal" in ev_type:
+                            ev_team = ev.get("team", {})
+                            ev_tid = str(ev_team.get("id", ""))
+                            ev_tname = normalize_text(ev_team.get("displayName", ""))
+                            ev_tabbr = normalize_text(ev.get("team", {}).get("abbreviation", ""))
+
+                            participants = ev.get("participants", [])
+                            scorer_norm = (
+                                normalize_text(participants[0].get("athlete", {}).get("displayName", ""))
+                                if participants
+                                else ""
+                            )
+
+                            if ev_tid == home_id_str or (ev_tname and ev_tname in home_norm) or (ev_tabbr and ev_tabbr == home_abbr_norm):
+                                goal_timeline.append("HOME")
+                            elif ev_tid == away_id_str or (ev_tname and ev_tname in away_norm) or (ev_tabbr and ev_tabbr == away_abbr_norm):
+                                goal_timeline.append("AWAY")
+                            elif scorer_norm and scorer_norm in player_to_side:
+                                side = player_to_side[scorer_norm]
+                                if "own goal" in ev_type:
+                                    side = "AWAY" if side == "HOME" else "HOME"
+                                goal_timeline.append(side)
+
+                    # Determinar quién metió el primer gol y la ventaja máxima alcanzada durante el partido
+                    first_goal_side = goal_timeline[0] if len(goal_timeline) > 0 else None
+                    if first_goal_side is None:
+                        if home_score > 0 and away_score == 0:
+                            first_goal_side = "HOME"
+                        elif away_score > 0 and home_score == 0:
+                            first_goal_side = "AWAY"
+
+                    running_h, running_a = 0, 0
+                    max_home_lead = 0
+                    max_away_lead = 0
+                    for g_side in goal_timeline:
+                        if g_side == "HOME":
+                            running_h += 1
+                        else:
+                            running_a += 1
+                        max_home_lead = max(max_home_lead, running_h - running_a)
+                        max_away_lead = max(max_away_lead, running_a - running_h)
+
+                    # Si un equipo anotó el primer gol, en ese instante tuvo al menos +1 de ventaja
+                    if first_goal_side == "HOME":
+                        max_home_lead = max(max_home_lead, 1)
+                    elif first_goal_side == "AWAY":
+                        max_away_lead = max(max_away_lead, 1)
+
+                    max_home_lead = max(max_home_lead, home_score - away_score)
+                    max_away_lead = max(max_away_lead, away_score - home_score)
+
+                    # Función auxiliar para identificar si un texto se refiere al equipo Local o al Visitante
+                    def is_referring_to_home(text_to_check: str) -> bool:
+                        t_norm = normalize_text(text_to_check)
+                        if not t_norm:
+                            return True
+                        # Coincidencia por sigla exacta o nombre de club
+                        home_tokens = [w for w in home_norm.split() if len(w) >= 3]
+                        away_tokens = [w for w in away_norm.split() if len(w) >= 3]
+
+                        if home_norm in t_norm or (home_abbr_norm and re.search(rf"\b{re.escape(home_abbr_norm)}\b", t_norm)):
+                            return True
+                        if away_norm in t_norm or (away_abbr_norm and re.search(rf"\b{re.escape(away_abbr_norm)}\b", t_norm)):
+                            return False
+                        if any(tok in t_norm for tok in home_tokens):
+                            return True
+                        if any(tok in t_norm for tok in away_tokens):
+                            return False
+                        return True
+
                     market = leg.get("market", "").upper()
                     selection = leg.get("selection", "")
+                    norm_sel = normalize_text(selection)
                     nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", selection)]
-                    target_line = nums[-1] if nums else 1.0
+                    target_line = nums[-1] if nums else 0.5
+                    is_under_pick = ("↓" in selection) or ("MENOS" in selection.upper()) or ("UNDER" in selection.upper())
 
                     actual_val = 0
                     hit_result = False
+                    is_binary_market = False  # True = solo muestra palomita/tache sin barra numérica
 
-                    is_player_prop = ("B+" in market) or ("JUGADOR" in market) or ("GOLEADOR" in market) or ("PORTERO" in market)
+                    is_player_prop = (
+                        ("B+" in market)
+                        or ("BANCA+" in market)
+                        or ("JUGADOR" in market)
+                        or ("GOLEADOR" in market)
+                        or ("PORTERO" in market)
+                    )
 
-                    if "GOLES TOTALES" in market or "GOLES 1RA" in market:
-                        actual_val = home_score + away_score
-                        hit_result = actual_val > target_line
-                    elif "AMBOS EQUIPOS ANOTAN" in market:
-                        actual_val = 2 if (home_score > 0 and away_score > 0) else 0
+                    # =========================================================
+                    # EVALUACIÓN EXACTA DE CADA MERCADO
+                    # =========================================================
+                    if "1ER GOL" in market or "PRIMER GOL" in market:
+                        is_binary_market = True
+                        pick_home = is_referring_to_home(selection)
+                        if "COMBO" in leg.get("badge", "").upper() or "GANA" in market:
+                            # 1er Gol + Gana
+                            won_match = (home_score > away_score) if pick_home else (away_score > home_score)
+                            scored_first = (first_goal_side == "HOME") if pick_home else (first_goal_side == "AWAY")
+                            hit_result = bool(scored_first and won_match)
+                        else:
+                            hit_result = (first_goal_side == "HOME") if pick_home else (first_goal_side == "AWAY")
+                        actual_val = 1 if hit_result else 0
                         target_line = 1
-                        hit_result = home_score > 0 and away_score > 0
+
+                    elif "TOTAL DE GOLES" in market:
+                        # Ejemplo: "TOTAL DE GOLES TORINO ↑/↓ 90'", "TOTAL DE GOLES NICE ↑/↓ 90'", "TOTAL DE GOLES PERTH GLORY FC ↑/↓ 90'"
+                        pick_home = is_referring_to_home(market)
+                        actual_val = home_score if pick_home else away_score
+                        hit_result = (actual_val < target_line) if is_under_pick else (actual_val > target_line)
+
+                    elif "GOLES TOTALES" in market or "GOLES 1RA" in market:
+                        actual_val = home_score + away_score
+                        hit_result = (actual_val < target_line) if is_under_pick else (actual_val > target_line)
+
+                    elif "AMBOS EQUIPOS ANOTAN" in market:
+                        is_binary_market = True
+                        hit_result = (home_score > 0 and away_score > 0)
+                        actual_val = 1 if hit_result else 0
+                        target_line = 1
+
                     elif "DOBLE OPORTUNIDAD" in market:
-                        actual_val = home_score
-                        target_line = away_score
-                        hit_result = home_score >= away_score
-                    elif "GANADOR" in market or "GANA PA" in market or "RESULTADO" in market:
-                        norm_sel = normalize_text(selection)
-                        is_home_pick = normalize_text(home_name) in norm_sel or normalize_text(home_abbr) in norm_sel
-                        actual_val = home_score if is_home_pick else away_score
-                        opp_val = away_score if is_home_pick else home_score
-                        target_line = opp_val + 1
-                        hit_result = actual_val > opp_val
+                        is_binary_market = True
+                        if "EMPATE" in selection.upper():
+                            pick_home = is_referring_to_home(selection.split("/")[0])
+                            hit_result = (home_score >= away_score) if pick_home else (away_score >= home_score)
+                        else:
+                            # FCB/RMA (Cualquiera gana, no empatan)
+                            hit_result = (home_score != away_score)
+                        actual_val = 1 if hit_result else 0
+                        target_line = 1
+
+                    elif "PA(1)" in market or "PAGO ANTICIPADO POR 1 GOL" in market:
+                        # Gana si al final gana O si en cualquier momento del partido tuvo +1 gol de ventaja (como Stuttgart)
+                        is_binary_market = True
+                        pick_home = is_referring_to_home(selection)
+                        if pick_home:
+                            hit_result = (home_score > away_score) or (max_home_lead >= 1)
+                        else:
+                            hit_result = (away_score > home_score) or (max_away_lead >= 1)
+                        actual_val = 1 if hit_result else 0
+                        target_line = 1
+
+                    elif "GANADOR" in market or "GANA PA" in market or "MONEY LINE" in market or "RESULTADO" in market:
+                        # Gana si al final gana O si en cualquier momento tuvo +2 goles de ventaja (Pago Anticipado estándar)
+                        is_binary_market = True
+                        pick_home = is_referring_to_home(selection)
+                        if pick_home:
+                            hit_result = (home_score > away_score) or (max_home_lead >= 2)
+                        else:
+                            hit_result = (away_score > home_score) or (max_away_lead >= 2)
+                        actual_val = 1 if hit_result else 0
+                        target_line = 1
+
+                    elif "HÁNDICAP" in market or "HANDICAP" in market:
+                        is_binary_market = True
+                        pick_home = is_referring_to_home(selection)
+                        diff = (home_score - away_score) if pick_home else (away_score - home_score)
+                        hit_result = diff > abs(target_line)
+                        actual_val = 1 if hit_result else 0
+                        target_line = 1
+
                     elif "CÓRNERS" in market or "CORNERS" in market:
                         actual_val = total_corners
-                        hit_result = actual_val > target_line
+                        hit_result = (actual_val < target_line) if is_under_pick else (actual_val > target_line)
+
                     elif "TARJETAS" in market:
                         actual_val = total_cards
-                        hit_result = actual_val > target_line
+                        hit_result = (actual_val < target_line) if is_under_pick else (actual_val > target_line)
+
                     elif not is_player_prop and "TIROS AL ARCO" in market:
-                        sel_prefix = normalize_text(selection.split("|")[0])
-                        is_home_pick = (
-                            sel_prefix in normalize_text(home_name)
-                            or normalize_text(home_name) in sel_prefix
-                            or normalize_text(home_abbr) == sel_prefix
-                        )
-                        actual_val = home_sot if is_home_pick else away_sot
+                        # Ejemplo: "TOTAL DE TIROS AL ARCO NICE 90'" -> "Nice | 4.0+"
+                        team_ref = selection.split("|")[0] if "|" in selection else market
+                        pick_home = is_referring_to_home(team_ref)
+                        actual_val = home_sot if pick_home else away_sot
                         hit_result = actual_val >= target_line
+
                     elif not is_player_prop and "TIROS" in market:
-                        sel_prefix = normalize_text(selection.split("|")[0])
-                        is_home_pick = (
-                            sel_prefix in normalize_text(home_name)
-                            or normalize_text(home_name) in sel_prefix
-                            or normalize_text(home_abbr) == sel_prefix
-                        )
-                        actual_val = home_shots if is_home_pick else away_shots
+                        team_ref = selection.split("|")[0] if "|" in selection else market
+                        pick_home = is_referring_to_home(team_ref)
+                        actual_val = home_shots if pick_home else away_shots
                         hit_result = actual_val >= target_line
+
                     else:
+                        # Mercado de Jugador (Tiros al Arco Banca+, Tiros Banca+, Atajadas, Goleador)
                         raw_left = selection.split("|")[0].split("(")[0].strip()
                         tokens = raw_left.split()
                         if len(tokens) > 1 and tokens[-1].isupper() and len(tokens[-1]) <= 4:
@@ -1716,30 +1888,26 @@ async def auto_verify_tickets(payload: dict):
 
                     leg["actualValue"] = actual_val
                     leg["targetValue"] = target_line
+                    leg["isBinaryMarket"] = is_binary_market
                     leg["hit"] = bool(hit_result)
                     updated_any = True
 
-                    target_teams_list = [
-                        normalize_text(home_name),
-                        normalize_text(away_name),
-                        normalize_text(home_abbr),
-                        normalize_text(away_abbr)
-                    ]
+                    target_teams_list = [home_norm, away_norm, home_abbr_norm, away_abbr_norm]
                     rule_id = f"auto-learn-{match_id}-{normalize_text(market)}"
                     already_logged = any(l.get("id") == rule_id for l in learning_logs)
 
                     if not already_logged:
                         learning_logs.insert(0, {
                             "id": rule_id,
-                            "tag": f"{'✅ ACIERTO' if hit_result else '🛠️ CORRECCIÓN'} ({home_abbr}/{away_abbr}): {market}",
+                            "tag": f"{'ACIERTO' if hit_result else 'CORRECCIÓN'} ({home_abbr}/{away_abbr}): {market}",
                             "source": f"Verificado: {home_name} {home_score}-{away_score} {away_name}",
                             "targetTeams": target_teams_list,
                             "marketType": market,
                             "outcome": "WIN" if hit_result else "FAIL",
                             "rule": (
-                                f"Exclusivo [{home_name} / {away_name}]: '{selection}' cumplió con {actual_val} (meta {target_line}). Se refuerza este mercado para estos clubes."
+                                f"Exclusivo [{home_name} / {away_name}]: '{selection}' cumplió en el partido. Se refuerza este mercado."
                                 if hit_result
-                                else f"Exclusivo [{home_name} / {away_name}]: '{selection}' hizo {actual_val} (meta {target_line}). Se ajusta la exigencia en {market} únicamente cuando jueguen estos equipos."
+                                else f"Exclusivo [{home_name} / {away_name}]: '{selection}' no se cumplió. Se ajusta la exigencia en {market} para estos equipos."
                             )
                         })
                 except Exception:
@@ -1751,22 +1919,3 @@ async def auto_verify_tickets(payload: dict):
         "tickets": tickets,
         "learningLogs": learning_logs
     }
-
-
-@app.get("/api/history")
-async def get_permanent_history():
-    if not os.path.exists(VAULT_FILE):
-        return {"tickets": [], "learningLogs": []}
-    with open(VAULT_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-@app.post("/api/history/sync")
-async def sync_history(payload: dict):
-    vault = {
-        "tickets": payload.get("tickets", []),
-        "learningLogs": payload.get("learningLogs", [])
-    }
-    with open(VAULT_FILE, "w", encoding="utf-8") as f:
-        json.dump(vault, f, ensure_ascii=False, indent=2)
-    return {"ok": True, "saved_tickets": len(vault["tickets"])}

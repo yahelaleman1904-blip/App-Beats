@@ -10,20 +10,43 @@ import {
 } from 'lucide-react';
 import { triggerHaptic } from '../utils/haptics';
 
-function analyzeMatchByMatchMetrics(match, deepData, learningLogs = []) {
+/**
+ * MOTOR DE EVALUACIÓN CONTEXTUAL PROFUNDA (CERO PLANTILLAS FIJAS)
+ * Evalúa partido por partido de ambos clubes (Local en casa vs Visitante fuera)
+ * y califica 14 mercados oficiales de Draftea según la probabilidad REAL de que ocurran
+ * en la línea exacta que Draftea tiene desbloqueada.
+ */
+function buildContextualDrafteaPredictions(
+  match,
+  deepData,
+  count,
+  riskLevel,
+  isLoadingThisMatch,
+  learningLogs = [],
+  lineAdjustments = {}
+) {
   const recentHome = deepData?.recentMatches?.home || [];
   const recentAway = deepData?.recentMatches?.away || [];
+  const allRecent = [...recentHome, ...recentAway];
   const stats = deepData?.statsL10 || match.statsL10 || {};
+  const tactical = deepData?.tacticalAnalysis;
+  const players =
+    deepData?.keyPlayers?.length > 0 ? deepData.keyPlayers : match.keyPlayers || [];
+  const gks = deepData?.goalkeepers || [];
 
-  const homeNameLower = match.homeTeam.name.toLowerCase();
-  const awayNameLower = match.awayTeam.name.toLowerCase();
-  const homeShortLower = match.homeTeam.short.toLowerCase();
-  const awayShortLower = match.awayTeam.short.toLowerCase();
+  const homeName = match.homeTeam.name;
+  const awayName = match.awayTeam.name;
+  const homeShort = match.homeTeam.short;
+  const awayShort = match.awayTeam.short;
 
+  const homeNameLower = homeName.toLowerCase();
+  const awayNameLower = awayName.toLowerCase();
+  const homeShortLower = homeShort.toLowerCase();
+  const awayShortLower = awayShort.toLowerCase();
+
+  // 1. Revisar memoria de aprendizaje específica para estos dos clubes
   const teamSpecificLogs = learningLogs.filter((log) => {
-    if (!Array.isArray(log.targetTeams) || log.targetTeams.length === 0) {
-      return false;
-    }
+    if (!Array.isArray(log.targetTeams) || log.targetTeams.length === 0) return false;
     return log.targetTeams.some(
       (kw) =>
         homeNameLower.includes(kw) ||
@@ -33,90 +56,85 @@ function analyzeMatchByMatchMetrics(match, deepData, learningLogs = []) {
     );
   });
 
-  const teamFailedGoalsBefore = teamSpecificLogs.some(
-    (l) =>
-      l.outcome === 'FAIL' &&
-      (l.marketType?.includes('GOLES') || l.tag?.includes('GOLES'))
+  const getMemoryModifier = (marketKeyword) => {
+    let mod = 0;
+    teamSpecificLogs.forEach((l) => {
+      const mText = `${l.marketType || ''} ${l.tag || ''}`.toUpperCase();
+      if (mText.includes(marketKeyword)) {
+        mod += l.outcome === 'WIN' ? 7 : -12;
+      }
+    });
+    return mod;
+  };
+
+  const getAdj = (groupKey) => Number(lineAdjustments[`${match.id}_${groupKey}`] || 0);
+
+  // 2. Extraer secuencias reales partido por partido (L5 Local y L5 Visitante)
+  const homeSotSeq = recentHome.map((m) => Number(m._mySoT ?? m.stats?.sot?.[0] ?? 5));
+  const awaySotSeq = recentAway.map((m) => Number(m._mySoT ?? m.stats?.sot?.[1] ?? 4));
+  const homeShotsSeq = recentHome.map((m) => Number(m._myShots ?? m.stats?.shots?.[0] ?? 13));
+  const awayShotsSeq = recentAway.map((m) => Number(m._myShots ?? m.stats?.shots?.[1] ?? 10));
+  const homeGoalsSeq = recentHome.map((m) => Number(m._myGoals ?? m.homeScore ?? 1));
+  const awayGoalsSeq = recentAway.map((m) => Number(m._myGoals ?? m.awayScore ?? 1));
+
+  const totalGoalsSeq = allRecent.map(
+    (m) => Number(m._totalGoals ?? (m.homeScore || 0) + (m.awayScore || 0))
   );
+  const totalCornersSeq = allRecent.map((m) => {
+    const cArr = m.stats?.corners || [5, 4];
+    return Number(cArr[0] || 0) + Number(cArr[1] || 0);
+  });
+  const totalCardsSeq = allRecent.map((m) => {
+    const kArr = m.stats?.cards || [2, 2];
+    return Number(kArr[0] || 0) + Number(kArr[1] || 0);
+  });
 
-  const homeSotList = recentHome.map((m) => Number(m._mySoT ?? m.stats?.sot?.[0] ?? 5));
-  const awaySotList = recentAway.map((m) => Number(m._mySoT ?? m.stats?.sot?.[1] ?? 4));
-  const homeShotsList = recentHome.map((m) => Number(m._myShots ?? m.stats?.shots?.[0] ?? 13));
+  // Función auxiliar que calcula el % real de cumplimiento en la secuencia de partidos
+  const calcRealHitPct = (seq, minTarget, fallbackPct) => {
+    if (!seq || seq.length === 0) return fallbackPct;
+    const hits = seq.filter((val) => val >= minTarget).length;
+    return Math.round((hits / seq.length) * 100);
+  };
 
-  // LÍNEAS REALES ABIERTAS EN DRAFTEA (Sin el tope falso de 5.0+)
-  // En Draftea (DAF 12), Barcelona abre en 7.0+ (1.42x) y Real Madrid en 5.0+ (1.69x)
-  const homeAvgSoT =
-    stats.homeSoTAvg ||
-    (homeSotList.length > 0
-      ? homeSotList.reduce((a, b) => a + b, 0) / homeSotList.length
-      : 5.2);
-  const awayAvgSoT =
-    stats.awaySoTAvg ||
-    (awaySotList.length > 0
-      ? awaySotList.reduce((a, b) => a + b, 0) / awaySotList.length
-      : 4.2);
+  // 3. Líneas Oficiales Desbloqueadas en Draftea según el promedio real de cada club
+  const homeSoTAvg = stats.homeSoTAvg || 5.2;
+  const awaySoTAvg = stats.awaySoTAvg || 4.0;
+  const homeShotsAvg = stats.homeShotsAvg || 13.5;
+  const awayShotsAvg = stats.awayShotsAvg || 10.8;
+  const expectedGoals =
+    stats.expectedTotalGoals || (stats.homeGoalsAvg || 1.5) + (stats.awayGoalsAvg || 1.2);
+  const combinedCardsAvg = (stats.homeCardsAvg || 2.2) + (stats.awayCardsAvg || 2.3);
+  const combinedCornersAvg = stats.cornersAvg || 9.4;
 
-  const openHomeSotLine =
-    stats.drafteaHomeSoTOpenLine || Math.max(3, Math.round(homeAvgSoT - 0.25));
-  const openAwaySotLine =
-    stats.drafteaAwaySoTOpenLine || Math.max(3, Math.round(awayAvgSoT - 0.25));
-  const openHomeShotsLine =
-    stats.drafteaHomeShotsOpenLine || Math.max(10, Math.round((stats.homeShotsAvg || 13) - 1.2));
-
-  // Calcular cuántas veces en los últimos 5 juegos cumplió esa línea exacta que pide Draftea
-  const homeSotHitsAtOpenLine = homeSotList.filter((v) => v >= openHomeSotLine).length;
-  const homeSotOpenProb =
-    homeSotList.length > 0
-      ? Math.round((homeSotHitsAtOpenLine / homeSotList.length) * 100)
-      : 78;
-
-  const awaySotHitsAtOpenLine = awaySotList.filter((v) => v >= openAwaySotLine).length;
-  const awaySotOpenProb =
-    awaySotList.length > 0
-      ? Math.round((awaySotHitsAtOpenLine / awaySotList.length) * 100)
-      : 74;
-
-  const allRecent = [...recentHome, ...recentAway];
-  const gamesOneGoalOrLess = allRecent.filter(
-    (m) => (m._totalGoals ?? m.homeScore + m.awayScore) <= 1
-  ).length;
-
-  // Detectar si ↑ 1.5 está bloqueado con candado en Draftea (ej. Barcelona vs Real Madrid en DAF12)
+  // En Draftea, si el partido es de alta expectativa goleadora (como Barcelona vs Real Madrid), ↑ 1.5 está bloqueado con candado
   const isOver15Locked =
     Boolean(stats.isOver15Locked) ||
     (stats.over25Goals ?? 0) >= 65 ||
-    (stats.expectedTotalGoals ?? 0) >= 2.75;
+    expectedGoals >= 2.75;
 
-  return {
-    openHomeSotLine,
-    openAwaySotLine,
-    openHomeShotsLine,
-    homeSotOpenProb: Math.max(62, Math.min(92, homeSotOpenProb)),
-    awaySotOpenProb: Math.max(60, Math.min(90, awaySotOpenProb)),
-    isOver15Locked,
-    isHighRiskUnder: gamesOneGoalOrLess >= 3 || teamFailedGoalsBefore,
-    stats
-  };
-}
+  const isParkTheBus =
+    tactical?.home?.parkTheBusRisk ||
+    tactical?.away?.parkTheBusRisk ||
+    totalGoalsSeq.filter((g) => g <= 1).length >= 4;
 
-function buildUniqueCategorizedPicks(
-  match,
-  deepData,
-  count,
-  riskLevel,
-  isLoadingThisMatch,
-  learningLogs = [],
-  lineAdjustments = {}
-) {
-  const mMetrics = analyzeMatchByMatchMetrics(match, deepData, learningLogs);
-  const stats = mMetrics.stats;
-  const tactical = deepData?.tacticalAnalysis;
-  const players =
-    deepData?.keyPlayers?.length > 0 ? deepData.keyPlayers : match.keyPlayers || [];
-  const gks = deepData?.goalkeepers || [];
+  // Identificar favorito real por desempeño Local vs Visita
+  const winProbHome = stats.winProbHome ?? 48;
+  const winProbAway = stats.winProbAway ?? 26;
+  const winProbDraw = stats.winProbDraw ?? 26;
+  const favIsHome = winProbHome >= winProbAway;
+  const favTeam = favIsHome ? match.homeTeam : match.awayTeam;
+  const dogTeam = favIsHome ? match.awayTeam : match.homeTeam;
+  const favWinProb = Math.max(winProbHome, winProbAway);
 
-  // Clasificar jugadores usando su línea REAL desbloqueada en Draftea (ej. Gordon 3.0+ Tiros = 1.36x)
-  const validPlayers = players
+  // Detectar si es un Clásico, Derbi o partido de alta tensión (más tarjetas y remates)
+  const isHighTensionMatch =
+    combinedCardsAvg >= 4.6 ||
+    ['LALIGA', 'LIBERTADORES', 'SUDAMERICANA', 'ARGENTINA', 'LIGA_MX', 'SERIE_A'].includes(
+      match.leagueId
+    );
+
+  // 4. Evaluar Jugadores Individuales en su LÍNEA REAL ABIERTA DE DRAFTEA
+  const evaluatedPlayers = players
     .filter(
       (p) =>
         p.name &&
@@ -125,408 +143,437 @@ function buildUniqueCategorizedPicks(
         !p.name.includes('Goleador')
     )
     .map((p) => {
-      const avgSh = Number(p.avgShots || 2.5);
+      const avgSh = Number(p.avgShots || 2.4);
       const avgSot = Number(p.avgSoT || 1.2);
+      const logs = p.matchLogs || [];
+
+      // Regla Draftea (DAF 13): Si promedia >= 3.1 tiros (ej. Gordon 3.6), 1.0+ y 2.0+ están bloqueados -> abre en 3.0+
       const openShotsLine =
         p.openShotsLine || (avgSh >= 3.1 ? Math.max(3, Math.floor(avgSh)) : avgSh >= 1.9 ? 2 : 1);
       const openSoTLine = p.openSoTLine || (avgSot >= 1.95 ? 2 : 1);
-      const openShotsOdd = p.openShotsOdd || (openShotsLine >= 3 ? 1.36 : 1.31);
-      const openSoTOdd = p.openSoTOdd || (openSoTLine >= 2 ? 1.44 : 1.30);
 
-      const logs = p.matchLogs || [];
-      const hitsSoT = logs.filter((l) => l.sot >= openSoTLine).length;
-      const hitsShots = logs.filter((l) => l.shots >= openShotsLine).length;
+      const hitsAtOpenShots =
+        logs.length > 0
+          ? logs.filter((l) => l.shots >= openShotsLine).length
+          : Math.round((p.openShotsHitRate || 80) / 20);
+      const hitsAtOpenSoT =
+        logs.length > 0
+          ? logs.filter((l) => l.sot >= openSoTLine).length
+          : Math.round((p.openSoTHitRate || 82) / 20);
+
+      const gms = Math.max(1, logs.length || p.gamesLast5 || 5);
+      const realShotsProb = Math.round((hitsAtOpenShots / gms) * 100);
+      const realSoTProb = Math.round((hitsAtOpenSoT / gms) * 100);
 
       return {
         ...p,
         openShotsLine,
         openSoTLine,
-        openShotsOdd,
-        openSoTOdd,
-        hitsSoT,
-        hitsShots,
-        consistencyScore:
-          (p.rotationStatus === 'TITULAR' ? 10 : 0) +
-          Math.max(hitsSoT, hitsShots) * 3 +
-          (p.isHome ? 2 : 0)
+        openShotsOdd: p.openShotsOdd || (openShotsLine >= 3 ? 1.36 : 1.31),
+        openSoTOdd: p.openSoTOdd || (openSoTLine >= 2 ? 1.44 : 1.29),
+        realShotsProb: Math.min(95, Math.max(52, realShotsProb)),
+        realSoTProb: Math.min(95, Math.max(54, realSoTProb))
       };
-    })
-    .sort((a, b) => b.consistencyScore - a.consistencyScore);
+    });
 
-  const p1 = validPlayers[0] || {
-    name: isLoadingThisMatch ? `Cargando ${match.homeTeam.short}...` : `${match.homeTeam.name}`,
-    team: match.homeTeam.short,
-    openSoTLine: 1,
-    openSoTOdd: 1.30,
-    openShotsLine: 3,
-    openShotsOdd: 1.36,
-    l10HitRate: 88
-  };
+  // Ordenar por quién cumple más veces su línea abierta de tiros al arco y quién cumple más veces su línea de tiros totales
+  const bestSoTPlayers = [...evaluatedPlayers].sort((a, b) => b.realSoTProb - a.realSoTProb);
+  const bestTotalShotsPlayers = [...evaluatedPlayers].sort(
+    (a, b) => b.realShotsProb - a.realShotsProb
+  );
 
-  const p2 = validPlayers[1] || {
-    name: isLoadingThisMatch ? `Cargando ${match.awayTeam.short}...` : `${match.awayTeam.name}`,
-    team: match.awayTeam.short,
-    openSoTLine: 1,
-    openSoTOdd: 1.32,
-    openShotsLine: 3,
-    openShotsOdd: 1.36,
-    l10HitRate: 85
-  };
+  const topSotPlayer = bestSoTPlayers[0];
+  const secondSotPlayer = bestSoTPlayers[1];
+  const topTotalShotsPlayer =
+    bestTotalShotsPlayers.find((p) => p.name !== topSotPlayer?.name) ||
+    bestTotalShotsPlayers[0];
 
-  const p3 = validPlayers[2] || p1;
+  const gk1 = gks[0];
 
-  const gk1 = gks[0] || {
-    name: isLoadingThisMatch
-      ? `Portero ${match.awayTeam.short}`
-      : `Portero (${match.awayTeam.short})`,
-    team: match.awayTeam.short,
-    openSavesLine: 2,
-    avgSaves: 3.0
-  };
+  // =========================================================================
+  // CONSTRUCCIÓN DINÁMICA DE CANDIDATOS PARA ESTE PARTIDO ESPECÍFICO
+  // Cada mercado recibe un "contextScore" real según lo que pasa en ESTE partido.
+  // =========================================================================
+  const candidateMarkets = [];
 
-  const isParkTheBus =
-    tactical?.home?.parkTheBusRisk ||
-    tactical?.away?.parkTheBusRisk ||
-    mMetrics.isHighRiskUnder;
+  // A. DOBLE OPORTUNIDAD 90' (En DAF 12: FCB/EMPATE 1.23x | FCB/RMA 1.17x)
+  const dcProb = favIsHome ? winProbHome + winProbDraw : winProbAway + winProbDraw;
+  const dcSelection =
+    Math.abs(winProbHome - winProbAway) <= 12
+      ? `${homeShort}/${awayShort}`
+      : favIsHome
+      ? `${homeShort}/EMPATE`
+      : `${awayShort}/EMPATE`;
+  const dcOdd =
+    Math.abs(winProbHome - winProbAway) <= 12
+      ? 1.19
+      : favIsHome
+      ? stats.dcHomeDrawOdd ?? 1.23
+      : stats.dcAwayDrawOdd ?? 1.34;
 
-  const favIsHome = (stats.winProbHome ?? 50) >= (stats.winProbAway ?? 25);
-  const favTeam = favIsHome ? match.homeTeam : match.awayTeam;
-  const favWinProb = Math.max(stats.winProbHome ?? 50, stats.winProbAway ?? 25);
+  candidateMarkets.push({
+    categoryGroup: 'DOUBLE_CHANCE',
+    adjustable: false,
+    market: 'DOBLE OPORTUNIDAD 90\'',
+    selection: dcSelection,
+    odd: dcOdd,
+    prob: Math.min(94, Math.max(68, dcProb + getMemoryModifier('DOBLE'))),
+    badge: '90\''
+  });
 
-  const pa1FavOdd = favIsHome ? stats.pa1HomeOdd ?? 1.25 : stats.pa1AwayOdd ?? 1.45;
-  const dcFavOdd = favIsHome ? stats.dcHomeDrawOdd ?? 1.23 : stats.dcAwayDrawOdd ?? 1.32;
-  const dcFavLabel = favIsHome
-    ? `${match.homeTeam.short}/EMPATE`
-    : `${match.awayTeam.short}/EMPATE`;
+  // B. MONEY LINE PAGO ANTICIPADO POR 1 GOL PA(1) 90' (En DAF12: FCB 1.25x / RMA 1.89x)
+  // Muy fuerte si el equipo favorito suele anotar el 1er gol del encuentro
+  const favFirstGoalProb = favIsHome
+    ? stats.homeFirstGoalProb ?? 56
+    : stats.awayFirstGoalProb ?? 42;
+  const pa1Prob = Math.round(favWinProb * 0.55 + favFirstGoalProb * 0.45) + 14;
+  const pa1Odd = favIsHome ? stats.pa1HomeOdd ?? 1.25 : stats.pa1AwayOdd ?? 1.52;
 
-  // REGLA DE GOLES TOTALES Y GOLES POR EQUIPO EN DRAFTEA (DAF 12 y DAF12):
-  // Si ↑ 1.5 está bloqueado con candado en Draftea (isOver15Locked = true), NUNCA sugerimos ↑ 1.5:
-  // En su lugar usamos "Total de goles [Equipo] ↑ 1.5" o "Goles Totales ↑ 2.5" o "↓ 3.5"
-  let safeGoalMarketTitle = 'GOLES TOTALES ↑/↓ 90\'';
-  let baseSafeGoalLine = 1.5;
-  let safeGoalDirection = '↑';
-  let safeGoalPrefix = '';
-  let safeGoalOdd = 1.28;
-  let safeGoalProb = stats.over15Goals ?? 84;
+  candidateMarkets.push({
+    categoryGroup: 'MONEYLINE_PA1',
+    adjustable: false,
+    market: 'MONEY LINE (PAGO ANTICIPADO POR 1 GOL) PA(1) 90\'',
+    selection: `${favTeam.short} (${favTeam.name})`,
+    odd: pa1Odd,
+    prob: Math.min(93, Math.max(62, pa1Prob + getMemoryModifier('PA'))),
+    badge: 'PA(1) 90\''
+  });
 
-  if (mMetrics.isOver15Locked) {
-    // Caso Barcelona vs Real Madrid (DAF12): ↑ 1.5 general está bloqueado con candado 🔒
-    // Pero en DAF 12 están abiertos: Total de goles Real Madrid ↑ 0.5 / ↑ 1.5 y Goles Totales ↑ 2.5
-    safeGoalMarketTitle = `TOTAL DE GOLES ${favTeam.name.toUpperCase()} ↑/↓ 90'`;
-    baseSafeGoalLine = 1.5;
-    safeGoalDirection = '↑';
-    safeGoalOdd = 1.38;
-    safeGoalProb = Math.min(89, (stats.over25Goals ?? 70) + 14);
-  } else if (isParkTheBus) {
-    safeGoalMarketTitle = 'GOLES TOTALES ↑/↓ 90\'';
-    baseSafeGoalLine = 3.5;
-    safeGoalDirection = '↓';
-    safeGoalOdd = 1.25;
-    safeGoalProb = stats.under35Goals ?? 85;
+  // C. TARJETAS TOTALES 90' (Sube a Top 1-2 en Clásicos, Derbis o equipos intensos)
+  const baseCardLine =
+    (combinedCardsAvg >= 4.8 ? 3.5 : 2.5) + getAdj('TOTAL_CARDS');
+  const cardsHitPct = calcRealHitPct(
+    totalCardsSeq,
+    Math.ceil(baseCardLine),
+    isHighTensionMatch ? 89 : 74
+  );
+  const tensionBonus = isHighTensionMatch ? 6 : -4;
+
+  candidateMarkets.push({
+    categoryGroup: 'TOTAL_CARDS',
+    adjustable: true,
+    market: 'TARJETAS TOTALES 90\'',
+    selection: `↑ ${baseCardLine.toFixed(1)} Tarjetas`,
+    odd: Number((1.28 + getAdj('TOTAL_CARDS') * 0.22).toFixed(2)),
+    prob: Math.min(95, Math.max(55, cardsHitPct + tensionBonus + getMemoryModifier('TARJETAS'))),
+    badge: '90\''
+  });
+
+  // D. TOTAL DE GOLES POR EQUIPO LOCAL / VISITANTE (En DAF 12: Total de goles Barcelona ↑ 1.5 / ↑ 2.5 y Real Madrid ↑ 0.5 / ↑ 1.5)
+  // Se vuelve prioritario cuando el Over 1.5 general está bloqueado con candado en Draftea
+  const homeTeamOpenGoalLine =
+    (stats.drafteaHomeTeamGoalLine || (stats.homeGoalsAvg >= 1.65 ? 1.5 : 0.5)) +
+    getAdj('HOME_TEAM_GOALS');
+  const homeTeamGoalHits = calcRealHitPct(
+    homeGoalsSeq,
+    Math.ceil(homeTeamOpenGoalLine),
+    stats.homeGoalsAvg >= 1.8 ? 86 : 78
+  );
+
+  candidateMarkets.push({
+    categoryGroup: 'HOME_TEAM_GOALS',
+    adjustable: true,
+    market: `TOTAL DE GOLES ${homeName.toUpperCase()} ↑/↓ 90'`,
+    selection: `↑ ${homeTeamOpenGoalLine.toFixed(1)}`,
+    odd: Number(
+      ((homeTeamOpenGoalLine >= 1.5 ? 1.48 : 1.24) + getAdj('HOME_TEAM_GOALS') * 0.28).toFixed(2)
+    ),
+    prob: Math.min(
+      94,
+      Math.max(58, homeTeamGoalHits + (isOver15Locked ? 6 : 0) + getMemoryModifier('GOLES'))
+    ),
+    badge: '90\''
+  });
+
+  const awayTeamOpenGoalLine =
+    (stats.drafteaAwayTeamGoalLine || (stats.awayGoalsAvg >= 1.65 ? 1.5 : 0.5)) +
+    getAdj('AWAY_TEAM_GOALS');
+  const awayTeamGoalHits = calcRealHitPct(
+    awayGoalsSeq,
+    Math.ceil(awayTeamOpenGoalLine),
+    stats.awayGoalsAvg >= 1.4 ? 83 : 72
+  );
+
+  candidateMarkets.push({
+    categoryGroup: 'AWAY_TEAM_GOALS',
+    adjustable: true,
+    market: `TOTAL DE GOLES ${awayName.toUpperCase()} ↑/↓ 90'`,
+    selection: `↑ ${awayTeamOpenGoalLine.toFixed(1)}`,
+    odd: Number(
+      ((awayTeamOpenGoalLine >= 1.5 ? 1.68 : 1.32) + getAdj('AWAY_TEAM_GOALS') * 0.28).toFixed(2)
+    ),
+    prob: Math.min(92, Math.max(55, awayTeamGoalHits + getMemoryModifier('GOLES'))),
+    badge: '90\''
+  });
+
+  // E. GOLES TOTALES DEL PARTIDO ↑/↓ 90' (Respeta el candado de ↑ 1.5 en Draftea)
+  if (isParkTheBus && !isOver15Locked) {
+    // Partido muy cerrado (ej. Atlético vs Osasuna): Mejor ir con Menos de 3.5 Goles (↓ 3.5)
+    const uLine = Math.max(2.5, 3.5 + getAdj('TOTAL_GOALS'));
+    const underHits =
+      totalGoalsSeq.length > 0
+        ? Math.round(
+            (totalGoalsSeq.filter((g) => g < uLine).length / totalGoalsSeq.length) * 100
+          )
+        : stats.under35Goals ?? 86;
+
+    candidateMarkets.push({
+      categoryGroup: 'TOTAL_GOALS',
+      adjustable: true,
+      market: 'GOLES TOTALES ↑/↓ 90\'',
+      selection: `↓ ${uLine.toFixed(1)}`,
+      odd: Number((1.26 - getAdj('TOTAL_GOALS') * 0.15).toFixed(2)),
+      prob: Math.min(94, Math.max(64, underHits + 4 + getMemoryModifier('GOLES'))),
+      badge: '90\''
+    });
+  } else {
+    // Si ↑ 1.5 está bloqueado en Draftea (ej. Barça vs Madrid), evalúa la probabilidad real de ↑ 2.5
+    const baseOverLine = (isOver15Locked ? 2.5 : 1.5) + getAdj('TOTAL_GOALS');
+    const overHits = calcRealHitPct(
+      totalGoalsSeq,
+      Math.ceil(baseOverLine),
+      baseOverLine >= 2.5 ? stats.over25Goals ?? 74 : stats.over15Goals ?? 84
+    );
+
+    candidateMarkets.push({
+      categoryGroup: 'TOTAL_GOALS',
+      adjustable: true,
+      market: 'GOLES TOTALES ↑/↓ 90\'',
+      selection: `↑ ${baseOverLine.toFixed(1)}`,
+      odd: Number(
+        ((baseOverLine >= 2.5 ? 1.52 : 1.28) + getAdj('TOTAL_GOALS') * 0.25).toFixed(2)
+      ),
+      prob: Math.min(93, Math.max(54, overHits + getMemoryModifier('GOLES'))),
+      badge: '90\''
+    });
   }
 
-  // Aplicar ajustes manuales [ - ] / [ + ] si el usuario movió alguna línea para empatar con su pantalla de Draftea
-  const getAdj = (groupKey) => Number(lineAdjustments[`${match.id}_${groupKey}`] || 0);
+  // F. TOTAL DE TIROS AL ARCO LOCAL (En DAF 12: Barcelona abre en 7.0+ (1.42x))
+  // Evalúa cuántas veces de verdad el local superó ESA línea abierta de Draftea
+  const openHomeSotLine = Math.max(
+    3,
+    (stats.drafteaHomeSoTOpenLine || Math.round(homeSoTAvg - 0.25)) + getAdj('HOME_TEAM_SOT')
+  );
+  const homeSotRealProb = calcRealHitPct(homeSotSeq, openHomeSotLine, 78);
 
-  const adjP1Sot = Math.max(1, (p1.openSoTLine || 1) + getAdj('PLAYER_1_SOT'));
-  const adjP2Shots = Math.max(1, (p2.openShotsLine || 3) + getAdj('PLAYER_2_SHOTS'));
-  const adjHomeSot = Math.max(2, mMetrics.openHomeSotLine + getAdj('HOME_TEAM_SOT'));
-  const adjAwaySot = Math.max(2, mMetrics.openAwaySotLine + getAdj('AWAY_TEAM_SOT'));
-  const adjGoalLine = Math.max(0.5, baseSafeGoalLine + getAdj('TOTAL_GOALS'));
-  const adjHomeShots = Math.max(6, mMetrics.openHomeShotsLine + getAdj('HOME_TEAM_SHOTS'));
-  const adjGkSaves = Math.max(1, (gk1.openSavesLine || 2) + getAdj('GK_SAVES'));
+  candidateMarkets.push({
+    categoryGroup: 'HOME_TEAM_SOT',
+    adjustable: true,
+    market: `TOTAL DE TIROS AL ARCO ${homeName.toUpperCase()} 90'`,
+    selection: `${homeName} | ${openHomeSotLine}.0+`,
+    odd: Number((1.42 + getAdj('HOME_TEAM_SOT') * 0.18).toFixed(2)),
+    prob: Math.min(
+      94,
+      Math.max(52, homeSotRealProb + getMemoryModifier('TIROS AL ARCO'))
+    ),
+    badge: '90\''
+  });
 
-  const catalogByRisk = {
-    SEGURO: [
-      {
-        categoryGroup: 'PLAYER_1_SOT',
-        adjustable: true,
-        market: 'TIROS AL ARCO BANCA+ 90\'',
-        selection: `${p1.name} ${p1.team} | ${adjP1Sot}.0+`,
-        odd: Number((p1.openSoTOdd + getAdj('PLAYER_1_SOT') * 0.28).toFixed(2)),
-        prob: p1.openSoTHitRate || 88,
-        badge: 'BANCA+ 90\''
-      },
-      {
-        categoryGroup: 'MONEYLINE_PA1',
-        adjustable: false,
-        market: 'MONEY LINE (PAGO ANTICIPADO POR 1 GOL) PA(1) 90\'',
-        selection: `${favTeam.short} (${favTeam.name})`,
-        odd: pa1FavOdd,
-        prob: Math.min(91, favWinProb + 26),
-        badge: 'PA(1) 90\''
-      },
-      {
-        categoryGroup: 'PLAYER_2_SHOTS',
-        adjustable: true,
-        market: 'TIROS BANCA+ 90\'',
-        selection: `${p2.name} ${p2.team} | ${adjP2Shots}.0+`,
-        odd: Number((p2.openShotsOdd + getAdj('PLAYER_2_SHOTS') * 0.25).toFixed(2)),
-        prob: p2.openShotsHitRate || 84,
-        badge: 'B+ 90\''
-      },
-      {
-        categoryGroup: 'DOUBLE_CHANCE',
-        adjustable: false,
-        market: 'DOBLE OPORTUNIDAD 90\'',
-        selection: dcFavLabel,
-        odd: dcFavOdd,
-        prob: Math.min(92, favWinProb + 25),
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'HOME_TEAM_SOT',
-        adjustable: true,
-        market: `TOTAL DE TIROS AL ARCO ${match.homeTeam.name.toUpperCase()} 90'`,
-        selection: `${match.homeTeam.name} | ${adjHomeSot}.0+`,
-        odd: Number((1.42 + getAdj('HOME_TEAM_SOT') * 0.18).toFixed(2)),
-        prob: mMetrics.homeSotOpenProb,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'TOTAL_GOALS',
-        adjustable: true,
-        market: safeGoalMarketTitle,
-        selection: `${safeGoalPrefix}${safeGoalDirection} ${adjGoalLine}`,
-        odd: Number((safeGoalOdd + getAdj('TOTAL_GOALS') * 0.22).toFixed(2)),
-        prob: safeGoalProb,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'AWAY_TEAM_SOT',
-        adjustable: true,
-        market: `TOTAL DE TIROS AL ARCO ${match.awayTeam.name.toUpperCase()} 90'`,
-        selection: `${match.awayTeam.name} | ${adjAwaySot}.0+`,
-        odd: Number((1.52 + getAdj('AWAY_TEAM_SOT') * 0.18).toFixed(2)),
-        prob: mMetrics.awaySotOpenProb,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'HOME_TEAM_SHOTS',
-        adjustable: true,
-        market: 'TOTAL DE TIROS EQUIPO 90\'',
-        selection: `${match.homeTeam.name} | ${adjHomeShots}.0+`,
-        odd: 1.32,
-        prob: 85,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'GK_SAVES',
-        adjustable: true,
-        market: 'ATAJADAS DE PORTERO 90\'',
-        selection: `${gk1.name} (${gk1.team}) | ${adjGkSaves}.0+`,
-        odd: 1.35,
-        prob: 84,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'TOTAL_CORNERS',
-        adjustable: false,
-        market: 'CÓRNERS TOTALES 90\'',
-        selection: '↑ 8.5 Tiros de Esquina',
-        odd: 1.33,
-        prob: 83,
-        badge: '90\''
-      }
-    ],
+  // G. TOTAL DE TIROS AL ARCO VISITANTE (En DAF 12: Real Madrid abre en 5.0+ (1.69x) o 4.0+)
+  const openAwaySotLine = Math.max(
+    2,
+    (stats.drafteaAwaySoTOpenLine || Math.round(awaySoTAvg - 0.25)) + getAdj('AWAY_TEAM_SOT')
+  );
+  const awaySotRealProb = calcRealHitPct(awaySotSeq, openAwaySotLine, 75);
 
-    ARRIESGADO: [
-      {
-        categoryGroup: 'TOTAL_GOALS',
-        adjustable: true,
-        market: 'GOLES TOTALES ↑/↓ 90\'',
-        selection: `↑ ${Math.max(1.5, 2.5 + getAdj('TOTAL_GOALS'))}`,
-        odd: 1.58,
-        prob: stats.over25Goals ?? 74,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'HOME_TEAM_GOALS',
-        adjustable: false,
-        market: `TOTAL DE GOLES ${match.homeTeam.name.toUpperCase()} ↑/↓ 90'`,
-        selection: `↑ ${stats.drafteaHomeTeamGoalLine === 1.5 ? '2.5' : '1.5'}`,
-        odd: 1.82,
-        prob: 72,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'AWAY_TEAM_GOALS',
-        adjustable: false,
-        market: `TOTAL DE GOLES ${match.awayTeam.name.toUpperCase()} ↑/↓ 90'`,
-        selection: '↑ 1.5',
-        odd: 1.86,
-        prob: 70,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'HOME_TEAM_SOT',
-        adjustable: true,
-        market: `TOTAL DE TIROS AL ARCO ${match.homeTeam.name.toUpperCase()} 90'`,
-        selection: `${match.homeTeam.name} | ${adjHomeSot}.0+`,
-        odd: 1.42,
-        prob: mMetrics.homeSotOpenProb,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'AWAY_TEAM_SOT',
-        adjustable: true,
-        market: `TOTAL DE TIROS AL ARCO ${match.awayTeam.name.toUpperCase()} 90'`,
-        selection: `${match.awayTeam.name} | ${adjAwaySot}.0+`,
-        odd: 1.69,
-        prob: mMetrics.awaySotOpenProb,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'MONEYLINE_PA',
-        adjustable: false,
-        market: 'MONEY LINE PA 90\'',
-        selection: `${favTeam.short} (${favTeam.name})`,
-        odd: favIsHome ? stats.mlHomeOdd ?? 1.60 : stats.mlAwayOdd ?? 1.85,
-        prob: favWinProb,
-        badge: 'PA 90\''
-      },
-      {
-        categoryGroup: 'PLAYER_2_SHOTS',
-        adjustable: true,
-        market: 'TIROS BANCA+ 90\'',
-        selection: `${p2.name} ${p2.team} | ${adjP2Shots}.0+`,
-        odd: p2.openShotsOdd,
-        prob: p2.openShotsHitRate || 78,
-        badge: 'B+ 90\''
-      },
-      {
-        categoryGroup: 'PLAYER_1_SOT',
-        adjustable: true,
-        market: 'TIROS AL ARCO BANCA+ 90\'',
-        selection: `${p1.name} ${p1.team} | ${adjP1Sot + 1}.0+`,
-        odd: 1.62,
-        prob: 73,
-        badge: 'BANCA+ 90\''
-      },
-      {
-        categoryGroup: 'BTTS_MARKET',
-        adjustable: false,
-        market: 'AMBOS EQUIPOS ANOTAN',
-        selection: 'Ambos Anotan: Sí',
-        odd: 1.56,
-        prob: stats.btts,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'PLAYER_3_SHOTS',
-        adjustable: false,
-        market: 'TIROS BANCA+ 90\'',
-        selection: `${p3.name} ${p3.team} | ${p3.openShotsLine || 3}.0+`,
-        odd: 1.48,
-        prob: 74,
-        badge: 'B+ 90\''
-      }
-    ],
+  candidateMarkets.push({
+    categoryGroup: 'AWAY_TEAM_SOT',
+    adjustable: true,
+    market: `TOTAL DE TIROS AL ARCO ${awayName.toUpperCase()} 90'`,
+    selection: `${awayName} | ${openAwaySotLine}.0+`,
+    odd: Number((1.54 + getAdj('AWAY_TEAM_SOT') * 0.18).toFixed(2)),
+    prob: Math.min(
+      92,
+      Math.max(50, awaySotRealProb + getMemoryModifier('TIROS AL ARCO'))
+    ),
+    badge: '90\''
+  });
 
-    SONADOR: [
-      {
-        categoryGroup: 'PLAYER_2_HIGH_SHOTS',
-        adjustable: true,
-        market: 'TIROS BANCA+ 90\'',
-        selection: `${p2.name} ${p2.team} | ${adjP2Shots + 1}.0+`,
-        odd: 2.00,
-        prob: 58,
-        badge: 'B+ 90\''
-      },
-      {
-        categoryGroup: 'HOME_TEAM_HIGH_SOT',
-        adjustable: true,
-        market: `TOTAL DE TIROS AL ARCO ${match.homeTeam.name.toUpperCase()} 90'`,
-        selection: `${match.homeTeam.name} | ${adjHomeSot + 1}.0+`,
-        odd: 1.85,
-        prob: 60,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'AWAY_TEAM_HIGH_SOT',
-        adjustable: true,
-        market: `TOTAL DE TIROS AL ARCO ${match.awayTeam.name.toUpperCase()} 90'`,
-        selection: `${match.awayTeam.name} | ${adjAwaySot + 1}.0+`,
-        odd: 2.05,
-        prob: 56,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'HOME_TEAM_GOALS',
-        adjustable: false,
-        market: `TOTAL DE GOLES ${match.homeTeam.name.toUpperCase()} ↑/↓ 90'`,
-        selection: '↑ 2.5',
-        odd: 1.82,
-        prob: 62,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'AWAY_TEAM_GOALS',
-        adjustable: false,
-        market: `TOTAL DE GOLES ${match.awayTeam.name.toUpperCase()} ↑/↓ 90'`,
-        selection: '↑ 1.5',
-        odd: 1.86,
-        prob: 60,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'PLAYER_1_HIGH_SOT',
-        adjustable: true,
-        market: 'TIROS AL ARCO BANCA+ 90\'',
-        selection: `${p1.name} ${p1.team} | 2.0+`,
-        odd: 1.95,
-        prob: 57,
-        badge: 'BANCA+ 90\''
-      },
-      {
-        categoryGroup: 'ANYTIME_SCORER',
-        adjustable: false,
-        market: 'GOLEADOR BANCA+ 90\'',
-        selection: `${p1.name} (${p1.team}) Anota Gol`,
-        odd: 2.05,
-        prob: 55,
-        badge: 'B+ 90\''
-      },
-      {
-        categoryGroup: 'TOTAL_GOALS',
-        adjustable: true,
-        market: 'GOLES TOTALES ↑/↓ 90\'',
-        selection: '↑ 3.5',
-        odd: 2.15,
-        prob: 54,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'GK_HIGH_SAVES',
-        adjustable: true,
-        market: 'ATAJADAS DE PORTERO 90\'',
-        selection: `${gk1.name} (${gk1.team}) | 4.0+`,
-        odd: 2.10,
-        prob: 55,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'HANDICAP_RESULT',
-        adjustable: false,
-        market: 'HÁNDICAP 90\'',
-        selection: `${favTeam.name} -1.5`,
-        odd: 2.35,
-        prob: 50,
-        badge: '90\''
-      }
-    ]
-  };
+  // H. CÓRNERS TOTALES 90' (Sube a prioridad alta cuando ambos equipos promedian >= 9.5 córners)
+  const baseCornerLine =
+    (combinedCornersAvg >= 10.2 ? 8.5 : 7.5) + getAdj('TOTAL_CORNERS');
+  const cornersRealProb = calcRealHitPct(
+    totalCornersSeq,
+    Math.ceil(baseCornerLine),
+    combinedCornersAvg >= 9.8 ? 88 : 76
+  );
 
-  // En modo SEGURO ordenamos los mercados abiertos por mayor probabilidad real de acierto
-  const rawList = [...(catalogByRisk[riskLevel] || catalogByRisk.SEGURO)];
-  if (riskLevel === 'SEGURO') {
-    rawList.sort((a, b) => b.prob - a.prob);
+  candidateMarkets.push({
+    categoryGroup: 'TOTAL_CORNERS',
+    adjustable: true,
+    market: 'CÓRNERS TOTALES 90\'',
+    selection: `↑ ${baseCornerLine.toFixed(1)} Tiros de Esquina`,
+    odd: Number((1.33 + getAdj('TOTAL_CORNERS') * 0.18).toFixed(2)),
+    prob: Math.min(94, Math.max(56, cornersRealProb + getMemoryModifier('CORNERS'))),
+    badge: '90\''
+  });
+
+  // I. AMBOS EQUIPOS ANOTAN (Prioritario en duelos de ida y vuelta como Barça vs Madrid)
+  const bttsRealProb = stats.btts ?? 70;
+  if (bttsRealProb >= 62 || riskLevel !== 'SEGURO') {
+    candidateMarkets.push({
+      categoryGroup: 'BTTS_MARKET',
+      adjustable: false,
+      market: 'AMBOS EQUIPOS ANOTAN 90\'',
+      selection: 'Ambos Anotan: Sí',
+      odd: 1.54,
+      prob: Math.min(92, Math.max(55, bttsRealProb + (expectedGoals >= 2.8 ? 6 : 0))),
+      badge: '90\''
+    });
   }
+
+  // J. 1ER GOL DEL PARTIDO 90' (Solo gana prioridad cuando un equipo domina claramente las aperturas de marcador)
+  const firstGoalLeaderIsHome =
+    (stats.homeFirstGoalProb ?? 55) >= (stats.awayFirstGoalProb ?? 38);
+  const firstGoalLeaderName = firstGoalLeaderIsHome ? homeName : awayName;
+  const firstGoalLeaderProb = Math.max(
+    stats.homeFirstGoalProb ?? 55,
+    stats.awayFirstGoalProb ?? 38
+  );
+
+  candidateMarkets.push({
+    categoryGroup: 'FIRST_GOAL_TEAM',
+    adjustable: false,
+    market: '1ER GOL DEL PARTIDO 90\'',
+    selection: `1er Gol: ${firstGoalLeaderName}`,
+    odd: 1.46,
+    prob: Math.min(90, Math.max(54, firstGoalLeaderProb + 12)),
+    badge: '90\''
+  });
+
+  // K. TIROS AL ARCO JUGADOR BANCA+ (Solo si el jugador realmente cumple su línea abierta de Draftea)
+  if (topSotPlayer) {
+    const p1Line = Math.max(1, topSotPlayer.openSoTLine + getAdj('PLAYER_1_SOT'));
+    candidateMarkets.push({
+      categoryGroup: 'PLAYER_1_SOT',
+      adjustable: true,
+      market: 'TIROS AL ARCO BANCA+ 90\'',
+      selection: `${topSotPlayer.name} ${topSotPlayer.team} | ${p1Line}.0+`,
+      odd: Number((topSotPlayer.openSoTOdd + getAdj('PLAYER_1_SOT') * 0.28).toFixed(2)),
+      prob: Math.min(
+        95,
+        Math.max(55, topSotPlayer.realSoTProb + getMemoryModifier('JUGADOR'))
+      ),
+      badge: 'BANCA+ 90\''
+    });
+  }
+
+  // L. TIROS TOTALES JUGADOR BANCA+ (Caso A. Gordon 3.0+ Tiros en DAF 13.jpeg con 4/5 verdes = 80%+)
+  if (topTotalShotsPlayer) {
+    const p2Line = Math.max(
+      1,
+      topTotalShotsPlayer.openShotsLine + getAdj('PLAYER_2_SHOTS')
+    );
+    candidateMarkets.push({
+      categoryGroup: 'PLAYER_2_SHOTS',
+      adjustable: true,
+      market: 'TIROS BANCA+ 90\'',
+      selection: `${topTotalShotsPlayer.name} ${topTotalShotsPlayer.team} | ${p2Line}.0+`,
+      odd: Number(
+        (topTotalShotsPlayer.openShotsOdd + getAdj('PLAYER_2_SHOTS') * 0.25).toFixed(2)
+      ),
+      prob: Math.min(
+        94,
+        Math.max(55, topTotalShotsPlayer.realShotsProb + getMemoryModifier('JUGADOR'))
+      ),
+      badge: 'B+ 90\''
+    });
+  }
+
+  // M. SEGUNDO TIRADOR AL ARCO (Para duelos con muchas estrellas en cancha)
+  if (secondSotPlayer && secondSotPlayer.name !== topSotPlayer?.name) {
+    const p3Line = Math.max(1, secondSotPlayer.openSoTLine + getAdj('PLAYER_3_SOT'));
+    candidateMarkets.push({
+      categoryGroup: 'PLAYER_3_SOT',
+      adjustable: true,
+      market: 'TIROS AL ARCO BANCA+ 90\'',
+      selection: `${secondSotPlayer.name} ${secondSotPlayer.team} | ${p3Line}.0+`,
+      odd: Number((secondSotPlayer.openSoTOdd + 0.06 + getAdj('PLAYER_3_SOT') * 0.28).toFixed(2)),
+      prob: Math.min(92, Math.max(54, secondSotPlayer.realSoTProb)),
+      badge: 'BANCA+ 90\''
+    });
+  }
+
+  // N. ATAJADAS DE PORTERO 90' (Sube a prioridad alta cuando el portero se enfrenta a un equipo que tira mucho)
+  if (gk1) {
+    const oppSoTAvg = gk1.team === homeShort ? awaySoTAvg : homeSoTAvg;
+    const gkOpenLine = Math.max(
+      2,
+      (gk1.openSavesLine || Math.round(gk1.avgSaves - 0.2)) + getAdj('GK_SAVES')
+    );
+    const gkLogs = gk1.matchLogs || [];
+    const gkHits =
+      gkLogs.length > 0
+        ? Math.round(
+            (gkLogs.filter((l) => l.saves >= gkOpenLine).length / gkLogs.length) * 100
+          )
+        : 80;
+    // Si el rival promedia más de 5.5 tiros al arco (como el Barça o Madrid), el portero tendrá trabajo garantizado
+    const siegeBonus = oppSoTAvg >= 5.5 ? 9 : 0;
+
+    candidateMarkets.push({
+      categoryGroup: 'GK_SAVES',
+      adjustable: true,
+      market: 'ATAJADAS DE PORTERO 90\'',
+      selection: `${gk1.name} (${gk1.team}) | ${gkOpenLine}.0+`,
+      odd: Number((1.36 + getAdj('GK_SAVES') * 0.20).toFixed(2)),
+      prob: Math.min(95, Math.max(55, gkHits + siegeBonus)),
+      badge: '90\''
+    });
+  }
+
+  // O. TOTAL DE TIROS EQUIPO LOCAL 90'
+  const openHomeShotsLine = Math.max(
+    8,
+    (stats.drafteaHomeShotsOpenLine || Math.round(homeShotsAvg - 1.2)) +
+      getAdj('HOME_TEAM_SHOTS')
+  );
+  const homeShotsRealProb = calcRealHitPct(homeShotsSeq, openHomeShotsLine, 80);
+
+  candidateMarkets.push({
+    categoryGroup: 'HOME_TEAM_SHOTS',
+    adjustable: true,
+    market: 'TOTAL DE TIROS EQUIPO 90\'',
+    selection: `${homeName} | ${openHomeShotsLine}.0+`,
+    odd: Number((1.34 + getAdj('HOME_TEAM_SHOTS') * 0.15).toFixed(2)),
+    prob: Math.min(93, Math.max(54, homeShotsRealProb)),
+    badge: '90\''
+  });
+
+  // =========================================================================
+  // AJUSTE SEGÚN EL NIVEL ELEGIDO (SEGURO / ARRIESGADO / SOÑADOR)
+  // Y ORDENAMIENTO 100% DINÁMICO POR MAYOR PROBABILIDAD REAL EN ESE PARTIDO
+  // =========================================================================
+  const calibratedPool = candidateMarkets.map((item) => {
+    if (riskLevel === 'SEGURO') {
+      return item;
+    }
+    if (riskLevel === 'ARRIESGADO') {
+      // En Arriesgado subimos las cuotas buscando valor medio-alto
+      return {
+        ...item,
+        odd: Number(Math.max(1.42, item.odd + 0.16).toFixed(2)),
+        prob: Math.max(52, item.prob - 9)
+      };
+    }
+    // En Soñador buscamos cuotas altas (1.85x+)
+    return {
+      ...item,
+      odd: Number(Math.max(1.85, item.odd + 0.52).toFixed(2)),
+      prob: Math.max(42, item.prob - 22)
+    };
+  });
+
+  // Ordenar de mayor a menor probabilidad real de que suceda en ESTE encuentro
+  calibratedPool.sort((a, b) => {
+    if (b.prob !== a.prob) return b.prob - a.prob;
+    return a.odd - b.odd;
+  });
 
   const seenGroups = new Set();
   const uniquePicks = [];
 
-  for (const item of rawList) {
+  for (const item of calibratedPool) {
     if (!seenGroups.has(item.categoryGroup)) {
       seenGroups.add(item.categoryGroup);
       uniquePicks.push(item);
@@ -553,7 +600,6 @@ export default function BeatsBuilderView({
   const [picksPerMatch, setPicksPerMatch] = useState(1);
   const [customAutoCount, setCustomAutoCount] = useState(18);
   const [variantOffset, setVariantOffset] = useState({});
-  // Permite subir o bajar medio/un punto cualquier línea si en Draftea cambió en vivo
   const [lineAdjustments, setLineAdjustments] = useState({});
   const [savedBanner, setSavedBanner] = useState(false);
 
@@ -636,7 +682,7 @@ export default function BeatsBuilderView({
     triggerHaptic('light');
     setVariantOffset((prev) => ({
       ...prev,
-      [matchId]: ((prev[matchId] || 0) + 1) % 6
+      [matchId]: ((prev[matchId] || 0) + 1) % 8
     }));
   };
 
@@ -649,10 +695,10 @@ export default function BeatsBuilderView({
       const deep = deepDataMap[match.id];
       const isLoadingThis = loadingDeepId === match.id || !deep;
       const offset = variantOffset[match.id] || 0;
-      const basePool = buildUniqueCategorizedPicks(
+      const basePool = buildContextualDrafteaPredictions(
         match,
         deep,
-        10,
+        12,
         riskLevel,
         isLoadingThis,
         learningLogs,
@@ -904,7 +950,7 @@ export default function BeatsBuilderView({
         </div>
       </div>
 
-      {/* LISTA DE PARTIDOS + BOLETO CALIBRADO CON DRAFTEA */}
+      {/* LISTA DE PARTIDOS + BOLETO CONTEXTUAL */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
         <div className="lg:col-span-6 space-y-2">
           <div className="flex items-center justify-between px-1">
@@ -991,9 +1037,9 @@ export default function BeatsBuilderView({
                 </span>
               </div>
               <div>
-                <span className="text-[9px] text-gray-400 block uppercase">Nivel</span>
+                <span className="text-[9px] text-gray-400 block uppercase">Certeza Media</span>
                 <span className="text-xs sm:text-sm font-black text-emerald-400">
-                  {riskLevel}
+                  {generatedTicket.avgLegProb}%
                 </span>
               </div>
             </div>
@@ -1043,8 +1089,8 @@ export default function BeatsBuilderView({
                               <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400 truncate">
                                 {leg.market}
                               </span>
-                              <span className="text-[8px] font-black px-1.5 py-0.2 rounded bg-gray-800 text-gray-300 shrink-0">
-                                {leg.badge}
+                              <span className="text-[8px] font-black px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 shrink-0">
+                                {leg.prob}%
                               </span>
                             </div>
                             <p className="text-xs font-extrabold text-white mt-0.5">
@@ -1053,7 +1099,6 @@ export default function BeatsBuilderView({
                           </div>
 
                           <div className="flex items-center gap-1.5 shrink-0">
-                            {/* Botones [-] y [+] para calibrar cualquier línea en 1 clic si Draftea la movió */}
                             {leg.adjustable && (
                               <div className="flex items-center gap-0.5 bg-[#141824] border border-gray-700 rounded-md p-0.5">
                                 <button

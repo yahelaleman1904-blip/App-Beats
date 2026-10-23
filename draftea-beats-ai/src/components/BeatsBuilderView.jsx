@@ -39,32 +39,112 @@ function buildContextualDrafteaPredictions(
   const homeShort = match.homeTeam.short;
   const awayShort = match.awayTeam.short;
 
-  const homeNameLower = homeName.toLowerCase();
-  const awayNameLower = awayName.toLowerCase();
-  const homeShortLower = homeShort.toLowerCase();
-  const awayShortLower = awayShort.toLowerCase();
+  // 1. MOTOR DE MEMORIA INDIVIDUAL POR CLUB (Aplica aunque enfrenten a un rival distinto hoy)
+  const matchClubLogs = (clubNameStr, clubShortStr) => {
+    const cName = (clubNameStr || '').toLowerCase();
+    const cShort = (clubShortStr || '').toLowerCase();
+    return learningLogs.filter((log) => {
+      if (!Array.isArray(log.targetTeams) || log.targetTeams.length === 0) return false;
+      return log.targetTeams.some(
+        (kw) =>
+          (kw.length >= 3 && cName.includes(kw)) ||
+          cShort === kw ||
+          (log.clubName && log.clubName.toLowerCase().includes(cName.slice(0, 5)))
+      );
+    });
+  };
 
-  // 1. Revisar memoria de aprendizaje específica para estos dos clubes
-  const teamSpecificLogs = learningLogs.filter((log) => {
-    if (!Array.isArray(log.targetTeams) || log.targetTeams.length === 0) return false;
-    return log.targetTeams.some(
-      (kw) =>
-        homeNameLower.includes(kw) ||
-        awayNameLower.includes(kw) ||
-        homeShortLower === kw ||
-        awayShortLower === kw
-    );
-  });
+  // Historial aprendido exclusivo del equipo Local y exclusivo del Visitante
+  const homeClubMemory = matchClubLogs(homeName, homeShort);
+  const awayClubMemory = matchClubLogs(awayName, awayShort);
 
-  const getMemoryModifier = (marketKeyword) => {
-    let mod = 0;
-    teamSpecificLogs.forEach((l) => {
-      const mText = `${l.marketType || ''} ${l.tag || ''}`.toUpperCase();
-      if (mText.includes(marketKeyword)) {
-        mod += l.outcome === 'WIN' ? 7 : -12;
+  // Vulnerabilidad defensiva del rival en turno (cuántos goles concede el rival cuando juega en esa condición)
+  const awayConcedesGoalsAvg =
+    recentAway.length > 0
+      ? recentAway.reduce((acc, m) => acc + Number(m._oppGoals ?? 1.2), 0) / recentAway.length
+      : 1.3;
+  const homeConcedesGoalsAvg =
+    recentHome.length > 0
+      ? recentHome.reduce((acc, m) => acc + Number(m._oppGoals ?? 1.0), 0) / recentHome.length
+      : 1.1;
+
+  const homeOpponentWeaknessBonus = awayConcedesGoalsAvg >= 1.5 ? 4 : 0;
+  const awayOpponentWeaknessBonus = homeConcedesGoalsAvg >= 1.5 ? 4 : 0;
+
+  const evaluateClubLearnedEdge = (
+    clubMemoryList,
+    marketKeyword,
+    isPlayingAtHome,
+    opponentVulnerabilityBonus = 0
+  ) => {
+    let probShift = 0;
+    let lineShift = 0;
+
+    clubMemoryList.forEach((log) => {
+      const mText = `${log.marketType || ''} ${log.tag || ''}`.toUpperCase();
+      if (!mText.includes(marketKeyword)) return;
+
+      if (log.outcome === 'WIN') {
+        probShift += isPlayingAtHome ? 6 : 4;
+      } else if (log.outcome === 'FAIL') {
+        probShift -= isPlayingAtHome ? 7 : 11;
+        lineShift -= 1;
       }
     });
-    return mod;
+
+    return {
+      probShift: Math.max(-18, Math.min(14, probShift + opponentVulnerabilityBonus)),
+      lineShift: Math.max(-1, Math.min(1, lineShift))
+    };
+  };
+
+  const getMemoryModifier = (marketKeyword, side = 'BOTH') => {
+    if (side === 'HOME') {
+      return evaluateClubLearnedEdge(
+        homeClubMemory,
+        marketKeyword,
+        true,
+        homeOpponentWeaknessBonus
+      ).probShift;
+    }
+    if (side === 'AWAY') {
+      return evaluateClubLearnedEdge(
+        awayClubMemory,
+        marketKeyword,
+        false,
+        awayOpponentWeaknessBonus
+      ).probShift;
+    }
+    const hEdge = evaluateClubLearnedEdge(
+      homeClubMemory,
+      marketKeyword,
+      true,
+      homeOpponentWeaknessBonus
+    ).probShift;
+    const aEdge = evaluateClubLearnedEdge(
+      awayClubMemory,
+      marketKeyword,
+      false,
+      awayOpponentWeaknessBonus
+    ).probShift;
+    return Math.round((hEdge + aEdge) / 2);
+  };
+
+  const getLearnedLineShift = (marketKeyword, side = 'HOME') => {
+    if (side === 'HOME') {
+      return evaluateClubLearnedEdge(
+        homeClubMemory,
+        marketKeyword,
+        true,
+        homeOpponentWeaknessBonus
+      ).lineShift;
+    }
+    return evaluateClubLearnedEdge(
+      awayClubMemory,
+      marketKeyword,
+      false,
+      awayOpponentWeaknessBonus
+    ).lineShift;
   };
 
   const getAdj = (groupKey) => Number(lineAdjustments[`${match.id}_${groupKey}`] || 0);
@@ -73,7 +153,6 @@ function buildContextualDrafteaPredictions(
   const homeSotSeq = recentHome.map((m) => Number(m._mySoT ?? m.stats?.sot?.[0] ?? 5));
   const awaySotSeq = recentAway.map((m) => Number(m._mySoT ?? m.stats?.sot?.[1] ?? 4));
   const homeShotsSeq = recentHome.map((m) => Number(m._myShots ?? m.stats?.shots?.[0] ?? 13));
-  const awayShotsSeq = recentAway.map((m) => Number(m._myShots ?? m.stats?.shots?.[1] ?? 10));
   const homeGoalsSeq = recentHome.map((m) => Number(m._myGoals ?? m.homeScore ?? 1));
   const awayGoalsSeq = recentAway.map((m) => Number(m._myGoals ?? m.awayScore ?? 1));
 
@@ -89,7 +168,6 @@ function buildContextualDrafteaPredictions(
     return Number(kArr[0] || 0) + Number(kArr[1] || 0);
   });
 
-  // Función auxiliar que calcula el % real de cumplimiento en la secuencia de partidos
   const calcRealHitPct = (seq, minTarget, fallbackPct) => {
     if (!seq || seq.length === 0) return fallbackPct;
     const hits = seq.filter((val) => val >= minTarget).length;
@@ -100,13 +178,11 @@ function buildContextualDrafteaPredictions(
   const homeSoTAvg = stats.homeSoTAvg || 5.2;
   const awaySoTAvg = stats.awaySoTAvg || 4.0;
   const homeShotsAvg = stats.homeShotsAvg || 13.5;
-  const awayShotsAvg = stats.awayShotsAvg || 10.8;
   const expectedGoals =
     stats.expectedTotalGoals || (stats.homeGoalsAvg || 1.5) + (stats.awayGoalsAvg || 1.2);
   const combinedCardsAvg = (stats.homeCardsAvg || 2.2) + (stats.awayCardsAvg || 2.3);
   const combinedCornersAvg = stats.cornersAvg || 9.4;
 
-  // En Draftea, si el partido es de alta expectativa goleadora (como Barcelona vs Real Madrid), ↑ 1.5 está bloqueado con candado
   const isOver15Locked =
     Boolean(stats.isOver15Locked) ||
     (stats.over25Goals ?? 0) >= 65 ||
@@ -123,10 +199,8 @@ function buildContextualDrafteaPredictions(
   const winProbDraw = stats.winProbDraw ?? 26;
   const favIsHome = winProbHome >= winProbAway;
   const favTeam = favIsHome ? match.homeTeam : match.awayTeam;
-  const dogTeam = favIsHome ? match.awayTeam : match.homeTeam;
   const favWinProb = Math.max(winProbHome, winProbAway);
 
-  // Detectar si es un Clásico, Derbi o partido de alta tensión (más tarjetas y remates)
   const isHighTensionMatch =
     combinedCardsAvg >= 4.6 ||
     ['LALIGA', 'LIBERTADORES', 'SUDAMERICANA', 'ARGENTINA', 'LIGA_MX', 'SERIE_A'].includes(
@@ -147,7 +221,6 @@ function buildContextualDrafteaPredictions(
       const avgSot = Number(p.avgSoT || 1.2);
       const logs = p.matchLogs || [];
 
-      // Regla Draftea (DAF 13): Si promedia >= 3.1 tiros (ej. Gordon 3.6), 1.0+ y 2.0+ están bloqueados -> abre en 3.0+
       const openShotsLine =
         p.openShotsLine || (avgSh >= 3.1 ? Math.max(3, Math.floor(avgSh)) : avgSh >= 1.9 ? 2 : 1);
       const openSoTLine = p.openSoTLine || (avgSot >= 1.95 ? 2 : 1);
@@ -165,18 +238,20 @@ function buildContextualDrafteaPredictions(
       const realShotsProb = Math.round((hitsAtOpenShots / gms) * 100);
       const realSoTProb = Math.round((hitsAtOpenSoT / gms) * 100);
 
+      const playerSide = p.team === homeShort ? 'HOME' : 'AWAY';
+      const clubEdge = getMemoryModifier('JUGADOR', playerSide);
+
       return {
         ...p,
         openShotsLine,
         openSoTLine,
         openShotsOdd: p.openShotsOdd || (openShotsLine >= 3 ? 1.36 : 1.31),
         openSoTOdd: p.openSoTOdd || (openSoTLine >= 2 ? 1.44 : 1.29),
-        realShotsProb: Math.min(95, Math.max(52, realShotsProb)),
-        realSoTProb: Math.min(95, Math.max(54, realSoTProb))
+        realShotsProb: Math.min(95, Math.max(52, realShotsProb + clubEdge)),
+        realSoTProb: Math.min(95, Math.max(54, realSoTProb + clubEdge))
       };
     });
 
-  // Ordenar por quién cumple más veces su línea abierta de tiros al arco y quién cumple más veces su línea de tiros totales
   const bestSoTPlayers = [...evaluatedPlayers].sort((a, b) => b.realSoTProb - a.realSoTProb);
   const bestTotalShotsPlayers = [...evaluatedPlayers].sort(
     (a, b) => b.realShotsProb - a.realShotsProb
@@ -192,11 +267,11 @@ function buildContextualDrafteaPredictions(
 
   // =========================================================================
   // CONSTRUCCIÓN DINÁMICA DE CANDIDATOS PARA ESTE PARTIDO ESPECÍFICO
-  // Cada mercado recibe un "contextScore" real según lo que pasa en ESTE partido.
   // =========================================================================
   const candidateMarkets = [];
+  const favSideTag = favIsHome ? 'HOME' : 'AWAY';
 
-  // A. DOBLE OPORTUNIDAD 90' (En DAF 12: FCB/EMPATE 1.23x | FCB/RMA 1.17x)
+  // A. DOBLE OPORTUNIDAD 90'
   const dcProb = favIsHome ? winProbHome + winProbDraw : winProbAway + winProbDraw;
   const dcSelection =
     Math.abs(winProbHome - winProbAway) <= 12
@@ -217,12 +292,11 @@ function buildContextualDrafteaPredictions(
     market: 'DOBLE OPORTUNIDAD 90\'',
     selection: dcSelection,
     odd: dcOdd,
-    prob: Math.min(94, Math.max(68, dcProb + getMemoryModifier('DOBLE'))),
+    prob: Math.min(94, Math.max(68, dcProb + getMemoryModifier('DOBLE', favSideTag))),
     badge: '90\''
   });
 
-  // B. MONEY LINE PAGO ANTICIPADO POR 1 GOL PA(1) 90' (En DAF12: FCB 1.25x / RMA 1.89x)
-  // Muy fuerte si el equipo favorito suele anotar el 1er gol del encuentro
+  // B. MONEY LINE PAGO ANTICIPADO POR 1 GOL PA(1) 90'
   const favFirstGoalProb = favIsHome
     ? stats.homeFirstGoalProb ?? 56
     : stats.awayFirstGoalProb ?? 42;
@@ -235,11 +309,11 @@ function buildContextualDrafteaPredictions(
     market: 'MONEY LINE (PAGO ANTICIPADO POR 1 GOL) PA(1) 90\'',
     selection: `${favTeam.short} (${favTeam.name})`,
     odd: pa1Odd,
-    prob: Math.min(93, Math.max(62, pa1Prob + getMemoryModifier('PA'))),
+    prob: Math.min(93, Math.max(62, pa1Prob + getMemoryModifier('PA', favSideTag))),
     badge: 'PA(1) 90\''
   });
 
-  // C. TARJETAS TOTALES 90' (Sube a Top 1-2 en Clásicos, Derbis o equipos intensos)
+  // C. TARJETAS TOTALES 90'
   const baseCardLine =
     (combinedCardsAvg >= 4.8 ? 3.5 : 2.5) + getAdj('TOTAL_CARDS');
   const cardsHitPct = calcRealHitPct(
@@ -259,11 +333,12 @@ function buildContextualDrafteaPredictions(
     badge: '90\''
   });
 
-  // D. TOTAL DE GOLES POR EQUIPO LOCAL / VISITANTE (En DAF 12: Total de goles Barcelona ↑ 1.5 / ↑ 2.5 y Real Madrid ↑ 0.5 / ↑ 1.5)
-  // Se vuelve prioritario cuando el Over 1.5 general está bloqueado con candado en Draftea
-  const homeTeamOpenGoalLine =
+  // D. TOTAL DE GOLES POR EQUIPO LOCAL / VISITANTE (Usa la memoria individual de cada club)
+  const homeTeamOpenGoalLine = Math.max(
+    0.5,
     (stats.drafteaHomeTeamGoalLine || (stats.homeGoalsAvg >= 1.65 ? 1.5 : 0.5)) +
-    getAdj('HOME_TEAM_GOALS');
+      getAdj('HOME_TEAM_GOALS')
+  );
   const homeTeamGoalHits = calcRealHitPct(
     homeGoalsSeq,
     Math.ceil(homeTeamOpenGoalLine),
@@ -280,14 +355,19 @@ function buildContextualDrafteaPredictions(
     ),
     prob: Math.min(
       94,
-      Math.max(58, homeTeamGoalHits + (isOver15Locked ? 6 : 0) + getMemoryModifier('GOLES'))
+      Math.max(
+        58,
+        homeTeamGoalHits + (isOver15Locked ? 6 : 0) + getMemoryModifier('GOLES', 'HOME')
+      )
     ),
     badge: '90\''
   });
 
-  const awayTeamOpenGoalLine =
+  const awayTeamOpenGoalLine = Math.max(
+    0.5,
     (stats.drafteaAwayTeamGoalLine || (stats.awayGoalsAvg >= 1.65 ? 1.5 : 0.5)) +
-    getAdj('AWAY_TEAM_GOALS');
+      getAdj('AWAY_TEAM_GOALS')
+  );
   const awayTeamGoalHits = calcRealHitPct(
     awayGoalsSeq,
     Math.ceil(awayTeamOpenGoalLine),
@@ -302,13 +382,12 @@ function buildContextualDrafteaPredictions(
     odd: Number(
       ((awayTeamOpenGoalLine >= 1.5 ? 1.68 : 1.32) + getAdj('AWAY_TEAM_GOALS') * 0.28).toFixed(2)
     ),
-    prob: Math.min(92, Math.max(55, awayTeamGoalHits + getMemoryModifier('GOLES'))),
+    prob: Math.min(92, Math.max(55, awayTeamGoalHits + getMemoryModifier('GOLES', 'AWAY'))),
     badge: '90\''
   });
 
-  // E. GOLES TOTALES DEL PARTIDO ↑/↓ 90' (Respeta el candado de ↑ 1.5 en Draftea)
+  // E. GOLES TOTALES DEL PARTIDO ↑/↓ 90'
   if (isParkTheBus && !isOver15Locked) {
-    // Partido muy cerrado (ej. Atlético vs Osasuna): Mejor ir con Menos de 3.5 Goles (↓ 3.5)
     const uLine = Math.max(2.5, 3.5 + getAdj('TOTAL_GOALS'));
     const underHits =
       totalGoalsSeq.length > 0
@@ -323,11 +402,10 @@ function buildContextualDrafteaPredictions(
       market: 'GOLES TOTALES ↑/↓ 90\'',
       selection: `↓ ${uLine.toFixed(1)}`,
       odd: Number((1.26 - getAdj('TOTAL_GOALS') * 0.15).toFixed(2)),
-      prob: Math.min(94, Math.max(64, underHits + 4 + getMemoryModifier('GOLES'))),
+      prob: Math.min(94, Math.max(64, underHits + 4 + getMemoryModifier('GOLES', 'BOTH'))),
       badge: '90\''
     });
   } else {
-    // Si ↑ 1.5 está bloqueado en Draftea (ej. Barça vs Madrid), evalúa la probabilidad real de ↑ 2.5
     const baseOverLine = (isOver15Locked ? 2.5 : 1.5) + getAdj('TOTAL_GOALS');
     const overHits = calcRealHitPct(
       totalGoalsSeq,
@@ -343,16 +421,17 @@ function buildContextualDrafteaPredictions(
       odd: Number(
         ((baseOverLine >= 2.5 ? 1.52 : 1.28) + getAdj('TOTAL_GOALS') * 0.25).toFixed(2)
       ),
-      prob: Math.min(93, Math.max(54, overHits + getMemoryModifier('GOLES'))),
+      prob: Math.min(93, Math.max(54, overHits + getMemoryModifier('GOLES', 'BOTH'))),
       badge: '90\''
     });
   }
 
-  // F. TOTAL DE TIROS AL ARCO LOCAL (En DAF 12: Barcelona abre en 7.0+ (1.42x))
-  // Evalúa cuántas veces de verdad el local superó ESA línea abierta de Draftea
+  // F. TOTAL DE TIROS AL ARCO LOCAL (Con ajuste de línea aprendido del historial individual del club local)
   const openHomeSotLine = Math.max(
     3,
-    (stats.drafteaHomeSoTOpenLine || Math.round(homeSoTAvg - 0.25)) + getAdj('HOME_TEAM_SOT')
+    (stats.drafteaHomeSoTOpenLine || Math.round(homeSoTAvg - 0.25)) +
+      getLearnedLineShift('TIROS AL ARCO', 'HOME') +
+      getAdj('HOME_TEAM_SOT')
   );
   const homeSotRealProb = calcRealHitPct(homeSotSeq, openHomeSotLine, 78);
 
@@ -364,15 +443,17 @@ function buildContextualDrafteaPredictions(
     odd: Number((1.42 + getAdj('HOME_TEAM_SOT') * 0.18).toFixed(2)),
     prob: Math.min(
       94,
-      Math.max(52, homeSotRealProb + getMemoryModifier('TIROS AL ARCO'))
+      Math.max(52, homeSotRealProb + getMemoryModifier('TIROS AL ARCO', 'HOME'))
     ),
     badge: '90\''
   });
 
-  // G. TOTAL DE TIROS AL ARCO VISITANTE (En DAF 12: Real Madrid abre en 5.0+ (1.69x) o 4.0+)
+  // G. TOTAL DE TIROS AL ARCO VISITANTE (Con ajuste de línea aprendido del historial individual del club visitante)
   const openAwaySotLine = Math.max(
     2,
-    (stats.drafteaAwaySoTOpenLine || Math.round(awaySoTAvg - 0.25)) + getAdj('AWAY_TEAM_SOT')
+    (stats.drafteaAwaySoTOpenLine || Math.round(awaySoTAvg - 0.25)) +
+      getLearnedLineShift('TIROS AL ARCO', 'AWAY') +
+      getAdj('AWAY_TEAM_SOT')
   );
   const awaySotRealProb = calcRealHitPct(awaySotSeq, openAwaySotLine, 75);
 
@@ -384,12 +465,12 @@ function buildContextualDrafteaPredictions(
     odd: Number((1.54 + getAdj('AWAY_TEAM_SOT') * 0.18).toFixed(2)),
     prob: Math.min(
       92,
-      Math.max(50, awaySotRealProb + getMemoryModifier('TIROS AL ARCO'))
+      Math.max(50, awaySotRealProb + getMemoryModifier('TIROS AL ARCO', 'AWAY'))
     ),
     badge: '90\''
   });
 
-  // H. CÓRNERS TOTALES 90' (Sube a prioridad alta cuando ambos equipos promedian >= 9.5 córners)
+  // H. CÓRNERS TOTALES 90'
   const baseCornerLine =
     (combinedCornersAvg >= 10.2 ? 8.5 : 7.5) + getAdj('TOTAL_CORNERS');
   const cornersRealProb = calcRealHitPct(
@@ -404,11 +485,11 @@ function buildContextualDrafteaPredictions(
     market: 'CÓRNERS TOTALES 90\'',
     selection: `↑ ${baseCornerLine.toFixed(1)} Tiros de Esquina`,
     odd: Number((1.33 + getAdj('TOTAL_CORNERS') * 0.18).toFixed(2)),
-    prob: Math.min(94, Math.max(56, cornersRealProb + getMemoryModifier('CORNERS'))),
+    prob: Math.min(94, Math.max(56, cornersRealProb + getMemoryModifier('CORNERS', 'BOTH'))),
     badge: '90\''
   });
 
-  // I. AMBOS EQUIPOS ANOTAN (Prioritario en duelos de ida y vuelta como Barça vs Madrid)
+  // I. AMBOS EQUIPOS ANOTAN
   const bttsRealProb = stats.btts ?? 70;
   if (bttsRealProb >= 62 || riskLevel !== 'SEGURO') {
     candidateMarkets.push({
@@ -417,15 +498,22 @@ function buildContextualDrafteaPredictions(
       market: 'AMBOS EQUIPOS ANOTAN 90\'',
       selection: 'Ambos Anotan: Sí',
       odd: 1.54,
-      prob: Math.min(92, Math.max(55, bttsRealProb + (expectedGoals >= 2.8 ? 6 : 0))),
+      prob: Math.min(
+        92,
+        Math.max(
+          55,
+          bttsRealProb + (expectedGoals >= 2.8 ? 6 : 0) + getMemoryModifier('AMBOS', 'BOTH')
+        )
+      ),
       badge: '90\''
     });
   }
 
-  // J. 1ER GOL DEL PARTIDO 90' (Solo gana prioridad cuando un equipo domina claramente las aperturas de marcador)
+  // J. 1ER GOL DEL PARTIDO 90'
   const firstGoalLeaderIsHome =
     (stats.homeFirstGoalProb ?? 55) >= (stats.awayFirstGoalProb ?? 38);
   const firstGoalLeaderName = firstGoalLeaderIsHome ? homeName : awayName;
+  const firstGoalSide = firstGoalLeaderIsHome ? 'HOME' : 'AWAY';
   const firstGoalLeaderProb = Math.max(
     stats.homeFirstGoalProb ?? 55,
     stats.awayFirstGoalProb ?? 38
@@ -437,11 +525,14 @@ function buildContextualDrafteaPredictions(
     market: '1ER GOL DEL PARTIDO 90\'',
     selection: `1er Gol: ${firstGoalLeaderName}`,
     odd: 1.46,
-    prob: Math.min(90, Math.max(54, firstGoalLeaderProb + 12)),
+    prob: Math.min(
+      90,
+      Math.max(54, firstGoalLeaderProb + 12 + getMemoryModifier('1ER GOL', firstGoalSide))
+    ),
     badge: '90\''
   });
 
-  // K. TIROS AL ARCO JUGADOR BANCA+ (Solo si el jugador realmente cumple su línea abierta de Draftea)
+  // K. TIROS AL ARCO JUGADOR BANCA+
   if (topSotPlayer) {
     const p1Line = Math.max(1, topSotPlayer.openSoTLine + getAdj('PLAYER_1_SOT'));
     candidateMarkets.push({
@@ -450,15 +541,12 @@ function buildContextualDrafteaPredictions(
       market: 'TIROS AL ARCO BANCA+ 90\'',
       selection: `${topSotPlayer.name} ${topSotPlayer.team} | ${p1Line}.0+`,
       odd: Number((topSotPlayer.openSoTOdd + getAdj('PLAYER_1_SOT') * 0.28).toFixed(2)),
-      prob: Math.min(
-        95,
-        Math.max(55, topSotPlayer.realSoTProb + getMemoryModifier('JUGADOR'))
-      ),
+      prob: topSotPlayer.realSoTProb,
       badge: 'BANCA+ 90\''
     });
   }
 
-  // L. TIROS TOTALES JUGADOR BANCA+ (Caso A. Gordon 3.0+ Tiros en DAF 13.jpeg con 4/5 verdes = 80%+)
+  // L. TIROS TOTALES JUGADOR BANCA+
   if (topTotalShotsPlayer) {
     const p2Line = Math.max(
       1,
@@ -472,15 +560,12 @@ function buildContextualDrafteaPredictions(
       odd: Number(
         (topTotalShotsPlayer.openShotsOdd + getAdj('PLAYER_2_SHOTS') * 0.25).toFixed(2)
       ),
-      prob: Math.min(
-        94,
-        Math.max(55, topTotalShotsPlayer.realShotsProb + getMemoryModifier('JUGADOR'))
-      ),
+      prob: topTotalShotsPlayer.realShotsProb,
       badge: 'B+ 90\''
     });
   }
 
-  // M. SEGUNDO TIRADOR AL ARCO (Para duelos con muchas estrellas en cancha)
+  // M. SEGUNDO TIRADOR AL ARCO
   if (secondSotPlayer && secondSotPlayer.name !== topSotPlayer?.name) {
     const p3Line = Math.max(1, secondSotPlayer.openSoTLine + getAdj('PLAYER_3_SOT'));
     candidateMarkets.push({
@@ -494,9 +579,10 @@ function buildContextualDrafteaPredictions(
     });
   }
 
-  // N. ATAJADAS DE PORTERO 90' (Sube a prioridad alta cuando el portero se enfrenta a un equipo que tira mucho)
+  // N. ATAJADAS DE PORTERO 90'
   if (gk1) {
     const oppSoTAvg = gk1.team === homeShort ? awaySoTAvg : homeSoTAvg;
+    const gkSide = gk1.team === homeShort ? 'HOME' : 'AWAY';
     const gkOpenLine = Math.max(
       2,
       (gk1.openSavesLine || Math.round(gk1.avgSaves - 0.2)) + getAdj('GK_SAVES')
@@ -508,7 +594,6 @@ function buildContextualDrafteaPredictions(
             (gkLogs.filter((l) => l.saves >= gkOpenLine).length / gkLogs.length) * 100
           )
         : 80;
-    // Si el rival promedia más de 5.5 tiros al arco (como el Barça o Madrid), el portero tendrá trabajo garantizado
     const siegeBonus = oppSoTAvg >= 5.5 ? 9 : 0;
 
     candidateMarkets.push({
@@ -517,7 +602,10 @@ function buildContextualDrafteaPredictions(
       market: 'ATAJADAS DE PORTERO 90\'',
       selection: `${gk1.name} (${gk1.team}) | ${gkOpenLine}.0+`,
       odd: Number((1.36 + getAdj('GK_SAVES') * 0.20).toFixed(2)),
-      prob: Math.min(95, Math.max(55, gkHits + siegeBonus)),
+      prob: Math.min(
+        95,
+        Math.max(55, gkHits + siegeBonus + getMemoryModifier('ATAJADAS', gkSide))
+      ),
       badge: '90\''
     });
   }
@@ -526,6 +614,7 @@ function buildContextualDrafteaPredictions(
   const openHomeShotsLine = Math.max(
     8,
     (stats.drafteaHomeShotsOpenLine || Math.round(homeShotsAvg - 1.2)) +
+      getLearnedLineShift('TIROS EQUIPO', 'HOME') +
       getAdj('HOME_TEAM_SHOTS')
   );
   const homeShotsRealProb = calcRealHitPct(homeShotsSeq, openHomeShotsLine, 80);
@@ -536,27 +625,27 @@ function buildContextualDrafteaPredictions(
     market: 'TOTAL DE TIROS EQUIPO 90\'',
     selection: `${homeName} | ${openHomeShotsLine}.0+`,
     odd: Number((1.34 + getAdj('HOME_TEAM_SHOTS') * 0.15).toFixed(2)),
-    prob: Math.min(93, Math.max(54, homeShotsRealProb)),
+    prob: Math.min(
+      93,
+      Math.max(54, homeShotsRealProb + getMemoryModifier('TIROS EQUIPO', 'HOME'))
+    ),
     badge: '90\''
   });
 
   // =========================================================================
-  // AJUSTE SEGÚN EL NIVEL ELEGIDO (SEGURO / ARRIESGADO / SOÑADOR)
-  // Y ORDENAMIENTO 100% DINÁMICO POR MAYOR PROBABILIDAD REAL EN ESE PARTIDO
+  // AJUSTE SEGÚN EL NIVEL ELEGIDO Y ORDENAMIENTO DINÁMICO POR PARTIDO
   // =========================================================================
   const calibratedPool = candidateMarkets.map((item) => {
     if (riskLevel === 'SEGURO') {
       return item;
     }
     if (riskLevel === 'ARRIESGADO') {
-      // En Arriesgado subimos las cuotas buscando valor medio-alto
       return {
         ...item,
         odd: Number(Math.max(1.42, item.odd + 0.16).toFixed(2)),
         prob: Math.max(52, item.prob - 9)
       };
     }
-    // En Soñador buscamos cuotas altas (1.85x+)
     return {
       ...item,
       odd: Number(Math.max(1.85, item.odd + 0.52).toFixed(2)),
@@ -564,7 +653,6 @@ function buildContextualDrafteaPredictions(
     };
   });
 
-  // Ordenar de mayor a menor probabilidad real de que suceda en ESTE encuentro
   calibratedPool.sort((a, b) => {
     if (b.prob !== a.prob) return b.prob - a.prob;
     return a.odd - b.odd;

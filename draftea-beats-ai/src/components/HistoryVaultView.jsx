@@ -44,24 +44,35 @@ export default function HistoryVaultView({
     setExpandedTicketId((prev) => (prev === ticketId ? null : ticketId));
   };
 
+// En src/components/HistoryVaultView.jsx, reemplaza handleAutoAnalyzeImages por esta versión:
   const handleAutoAnalyzeImages = async (e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
     triggerHaptic('medium');
     setIsScanningImage(true);
+    let totalRulesAdded = 0;
 
     try {
       for (let i = 0; i < files.length; i++) {
-        setScanStatusText(`Procesando ${i + 1}/${files.length}...`);
-        const learnedRule = await analyzeDrafteaTicketImage(files[i]);
-        if (onAddCustomLearningRule && learnedRule) {
-          onAddCustomLearningRule(learnedRule);
+        setScanStatusText(`Auditando predicciones de captura ${i + 1}/${files.length}...`);
+        const learnedRules = await analyzeDrafteaTicketImage(files[i]);
+        const rulesArray = Array.isArray(learnedRules)
+          ? learnedRules
+          : learnedRules
+          ? [learnedRules]
+          : [];
+
+        if (onAddCustomLearningRule) {
+          rulesArray.forEach((ruleItem) => {
+            onAddCustomLearningRule(ruleItem);
+            totalRulesAdded += 1;
+          });
         }
       }
       triggerHaptic('success');
-      setScanStatusText('Capturas procesadas.');
-      setTimeout(() => setScanStatusText(''), 4000);
+      setScanStatusText(`Se extrajeron ${totalRulesAdded} reglas individuales por equipo.`);
+      setTimeout(() => setScanStatusText(''), 4500);
     } catch {
       setScanStatusText('Error al leer captura.');
     } finally {
@@ -69,7 +80,7 @@ export default function HistoryVaultView({
       e.target.value = '';
     }
   };
-
+  
   const metrics = useMemo(() => {
     const calcByCategory = (cat) => {
       const list = tickets.filter((t) => t.category === cat);

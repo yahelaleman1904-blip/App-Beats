@@ -1886,30 +1886,71 @@ async def auto_verify_tickets(payload: dict):
                                 actual_val = matched_p["shots"]
                             hit_result = actual_val >= target_line
 
+# En draftea-backend/main.py, al final del bloque try dentro de auto_verify_tickets:
                     leg["actualValue"] = actual_val
                     leg["targetValue"] = target_line
                     leg["isBinaryMarket"] = is_binary_market
                     leg["hit"] = bool(hit_result)
                     updated_any = True
 
-                    target_teams_list = [home_norm, away_norm, home_abbr_norm, away_abbr_norm]
-                    rule_id = f"auto-learn-{match_id}-{normalize_text(market)}"
-                    already_logged = any(l.get("id") == rule_id for l in learning_logs)
-
-                    if not already_logged:
-                        learning_logs.insert(0, {
-                            "id": rule_id,
-                            "tag": f"{'ACIERTO' if hit_result else 'CORRECCIÓN'} ({home_abbr}/{away_abbr}): {market}",
-                            "source": f"Verificado: {home_name} {home_score}-{away_score} {away_name}",
-                            "targetTeams": target_teams_list,
-                            "marketType": market,
-                            "outcome": "WIN" if hit_result else "FAIL",
-                            "rule": (
-                                f"Exclusivo [{home_name} / {away_name}]: '{selection}' cumplió en el partido. Se refuerza este mercado."
-                                if hit_result
-                                else f"Exclusivo [{home_name} / {away_name}]: '{selection}' no se cumplió. Se ajusta la exigencia en {market} para estos equipos."
-                            )
+                    # Identificar si el pick pertenecía exclusivamente al Local, al Visitante o a Ambos
+                    involved_clubs = []
+                    if is_referring_to_home(f"{market} {selection}") and not is_referring_to_home(away_name):
+                        involved_clubs.append({
+                            "name": home_name,
+                            "abbr": home_abbr,
+                            "keys": [home_norm, home_abbr_norm],
+                            "teamGoals": home_score,
+                            "teamSoT": home_sot,
+                            "teamShots": home_shots
                         })
+                    if not involved_clubs or away_norm in normalize_text(f"{market} {selection}") or "TOTALES" in market or "AMBOS" in market:
+                        if not any(c["name"] == home_name for c in involved_clubs) and ("TOTALES" in market or "AMBOS" in market):
+                            involved_clubs.append({
+                                "name": home_name,
+                                "abbr": home_abbr,
+                                "keys": [home_norm, home_abbr_norm],
+                                "teamGoals": home_score,
+                                "teamSoT": home_sot,
+                                "teamShots": home_shots
+                            })
+                        involved_clubs.append({
+                            "name": away_name,
+                            "abbr": away_abbr,
+                            "keys": [away_norm, away_abbr_norm],
+                            "teamGoals": away_score,
+                            "teamSoT": away_sot,
+                            "teamShots": away_shots
+                        })
+
+                    for club_item in involved_clubs:
+                        c_name = club_item["name"]
+                        c_abbr = club_item["abbr"]
+                        rule_id = f"auto-learn-{match_id}-{c_abbr}-{normalize_text(market)}-{normalize_text(selection)}"
+                        already_logged = any(l.get("id") == rule_id for l in learning_logs)
+
+                        if not already_logged:
+                            learning_logs.insert(0, {
+                                "id": rule_id,
+                                "tag": f"{'ACIERTO' if hit_result else 'AJUSTE'} INDIVIDUAL [{c_abbr}]: {market}",
+                                "source": f"{home_name} {home_score}-{away_score} {away_name}",
+                                "clubName": c_name,
+                                "clubCode": c_abbr.lower(),
+                                "targetTeams": club_item["keys"],
+                                "marketType": market,
+                                "selection": selection,
+                                "targetLine": target_line,
+                                "actualValue": actual_val,
+                                "recordedTeamGoals": club_item["teamGoals"],
+                                "recordedTeamSoT": club_item["teamSoT"],
+                                "recordedTeamShots": club_item["teamShots"],
+                                "outcome": "WIN" if hit_result else "FAIL",
+                                "rule": (
+                                    f"Perfil {c_name}: Cumplió '{selection}' con valor real {actual_val} ({c_abbr} registró {club_item['teamGoals']} goles y {club_item['teamSoT']} tiros al arco). Se integra a su historial para próximos rivales."
+                                    if hit_result
+                                    else f"Perfil {c_name}: Falló '{selection}' quedándose en {actual_val} (meta {target_line}). En el próximo juego de {c_name} se ajustará la línea según su condición de local/visita y la defensa rival."
+                                )
+                            })
                 except Exception:
                     continue
 

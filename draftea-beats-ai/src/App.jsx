@@ -116,7 +116,7 @@ export default function App() {
     }
   }, [learningLogs]);
 
-  // Auto-Verificador de Beats contra ESPN
+// En src/App.jsx, reemplaza handleAutoVerifyTickets por esta versión sin pérdida de reglas:
   const handleAutoVerifyTickets = useCallback(async () => {
     if (savedTickets.length === 0) return;
     setIsVerifying(true);
@@ -133,7 +133,14 @@ export default function App() {
       if (data.ok && Array.isArray(data.tickets)) {
         setSavedTickets(data.tickets);
         if (Array.isArray(data.learningLogs)) {
-          setLearningLogs(data.learningLogs);
+          // Fusión sin límite: conserva todas tus reglas de fotos + las nuevas verificadas
+          setLearningLogs((prevLogs) => {
+            const mergedMap = new Map();
+            [...data.learningLogs, ...prevLogs].forEach((item) => {
+              if (item && item.id) mergedMap.set(item.id, item);
+            });
+            return Array.from(mergedMap.values());
+          });
         }
       }
     } catch (err) {

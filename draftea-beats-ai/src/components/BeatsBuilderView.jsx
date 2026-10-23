@@ -142,6 +142,27 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
     tactical?.away?.parkTheBusRisk ||
     mMetrics.isHighRiskUnder;
 
+  // IDEA 2 Y 3: Determinar quién tiene la mayor probabilidad de meter el 1er Gol y cuál línea de Goles sí está abierta en Draftea
+  const homeFirstProb = stats.homeFirstGoalProb ?? 56;
+  const awayFirstProb = stats.awayFirstGoalProb ?? 38;
+  const firstGoalTeamName =
+    homeFirstProb >= awayFirstProb ? match.homeTeam.name : match.awayTeam.name;
+  const firstGoalProb = Math.max(homeFirstProb, awayFirstProb);
+
+  // Si es duelo cerrado (ej. Atlético vs Osasuna) donde Draftea no abre ↑ 0.5, usamos ↓ 3.5 Goles (abierto en Draftea con ~1.25x)
+  // Si es duelo abierto/estándar, usamos ↑ 1.5 Goles (abierto en Draftea con ~1.26x)
+  const safeDrafteaGoalSelection = isParkTheBus ? '↓ 3.5' : '↑ 1.5';
+  const safeDrafteaGoalOdd = isParkTheBus ? 1.25 : 1.26;
+  const safeDrafteaGoalProb = isParkTheBus
+    ? stats.under35Goals ?? 84
+    : stats.over15Goals ?? 84;
+
+  const favWinnerName =
+    (stats.winProbHome ?? 50) >= (stats.winProbAway ?? 25)
+      ? match.homeTeam.name
+      : match.awayTeam.name;
+  const favWinProb = Math.max(stats.winProbHome ?? 50, stats.winProbAway ?? 25);
+
   const catalogByRisk = {
     SEGURO: [
       {
@@ -155,9 +176,9 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
       {
         categoryGroup: 'TOTAL_GOALS',
         market: 'GOLES TOTALES 90\'',
-        selection: isParkTheBus ? '↑ 0.5' : '↑ 1.5',
-        odd: isParkTheBus ? 1.10 : 1.24,
-        prob: isParkTheBus ? stats.over05Goals : stats.over15Goals,
+        selection: safeDrafteaGoalSelection,
+        odd: safeDrafteaGoalOdd,
+        prob: safeDrafteaGoalProb,
         badge: '90\''
       },
       {
@@ -167,6 +188,14 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         odd: 1.30,
         prob: 89,
         badge: '90\''
+      },
+      {
+        categoryGroup: 'FIRST_GOAL_TEAM',
+        market: '1ER GOL DEL PARTIDO 90\'',
+        selection: `1er Gol: ${firstGoalTeamName}`,
+        odd: 1.42,
+        prob: Math.max(76, firstGoalProb),
+        badge: '1ER GOL'
       },
       {
         categoryGroup: 'PLAYER_2_SHOTS',
@@ -182,6 +211,14 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         selection: `${match.homeTeam.name} | ${mMetrics.safeHomeShotsLine}.0+`,
         odd: 1.27,
         prob: 88,
+        badge: '90\''
+      },
+      {
+        categoryGroup: 'DOUBLE_CHANCE',
+        market: 'DOBLE OPORTUNIDAD 90\'',
+        selection: `${favWinnerName} Gana o Empata`,
+        odd: 1.22,
+        prob: Math.min(92, favWinProb + 24),
         badge: '90\''
       },
       {
@@ -201,22 +238,6 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         badge: '90\''
       },
       {
-        categoryGroup: 'DOUBLE_CHANCE',
-        market: 'DOBLE OPORTUNIDAD 90\'',
-        selection: `${match.homeTeam.name} Gana o Empata`,
-        odd: 1.22,
-        prob: 89,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'FIRST_HALF_GOALS',
-        market: 'GOLES 1RA MITAD',
-        selection: '1ra Mitad ↑ 0.5',
-        odd: 1.34,
-        prob: 83,
-        badge: '1T'
-      },
-      {
         categoryGroup: 'TOTAL_CARDS',
         market: 'TARJETAS TOTALES 90\'',
         selection: '↑ 2.5 Tarjetas',
@@ -230,8 +251,8 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
       {
         categoryGroup: 'PLAYER_1_SOT',
         market: 'TIROS AL ARCO B+ 90\'',
-        selection: `${p1.name} ${p1.team} | ${p1.avgSoT >= 1.9 ? '2.0+' : '1.0+'}`,
-        odd: p1.avgSoT >= 1.9 ? 1.58 : 1.38,
+        selection: `${p1.name} ${p1.team} | ${p1.avgSoT >= 1.8 ? '2.0+' : '1.0+'}`,
+        odd: p1.avgSoT >= 1.8 ? 1.58 : 1.38,
         prob: 79,
         badge: 'B+ 90\''
       },
@@ -242,6 +263,22 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         odd: isParkTheBus ? 1.38 : 1.58,
         prob: isParkTheBus ? stats.over15Goals : stats.over25Goals,
         badge: '90\''
+      },
+      {
+        categoryGroup: 'FIRST_GOAL_TEAM',
+        market: '1ER GOL DEL PARTIDO 90\'',
+        selection: `1er Gol: ${firstGoalTeamName}`,
+        odd: 1.55,
+        prob: firstGoalProb,
+        badge: '1ER GOL'
+      },
+      {
+        categoryGroup: 'MONEYLINE_PA',
+        market: 'GANA PA 90\'',
+        selection: `${favWinnerName}`,
+        odd: 1.58,
+        prob: favWinProb,
+        badge: 'PA 90\''
       },
       {
         categoryGroup: 'HOME_TEAM_SOT',
@@ -258,14 +295,6 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         odd: 1.46,
         prob: 76,
         badge: 'B+ 90\''
-      },
-      {
-        categoryGroup: 'MONEYLINE_PA',
-        market: 'GANA PA 90\'',
-        selection: `${match.homeTeam.name}`,
-        odd: 1.58,
-        prob: 74,
-        badge: 'PA 90\''
       },
       {
         categoryGroup: 'BTTS_MARKET',
@@ -289,14 +318,6 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         selection: `${match.awayTeam.name} | ${mMetrics.safeAwaySotLine}.0+`,
         odd: 1.50,
         prob: 76,
-        badge: '90\''
-      },
-      {
-        categoryGroup: 'TOTAL_CORNERS',
-        market: 'CÓRNERS TOTALES 90\'',
-        selection: '↑ 9.5 Tiros de Esquina',
-        odd: 1.62,
-        prob: 73,
         badge: '90\''
       },
       {
@@ -325,6 +346,14 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         odd: 2.15,
         prob: 56,
         badge: 'B+ 90\''
+      },
+      {
+        categoryGroup: 'FIRST_GOAL_AND_WIN',
+        market: '1ER GOL + GANA PA 90\'',
+        selection: `${favWinnerName} Anota 1ro y Gana`,
+        odd: 2.10,
+        prob: 54,
+        badge: 'COMBO'
       },
       {
         categoryGroup: 'TOTAL_GOALS',
@@ -361,7 +390,7 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
       {
         categoryGroup: 'RESULT_AND_BTTS',
         market: 'GANA PA + AMBOS ANOTAN',
-        selection: `Gana ${match.homeTeam.short} y Ambos Anotan`,
+        selection: `Gana ${favWinnerName} y Ambos Anotan`,
         odd: 2.65,
         prob: 48,
         badge: '90\''
@@ -375,17 +404,9 @@ function buildUniqueCategorizedPicks(match, deepData, count, riskLevel, isLoadin
         badge: '90\''
       },
       {
-        categoryGroup: 'FIRST_HALF_GOALS',
-        market: 'GOLES 1RA MITAD',
-        selection: '1ra Mitad ↑ 1.5',
-        odd: 2.25,
-        prob: 51,
-        badge: '1T'
-      },
-      {
         categoryGroup: 'HANDICAP_RESULT',
         market: 'HÁNDICAP 90\'',
-        selection: `${match.homeTeam.name} -1.5`,
+        selection: `${favWinnerName} -1.5`,
         odd: 2.35,
         prob: 50,
         badge: '90\''

@@ -596,6 +596,19 @@ async def parse_past_match_summary(
         my_squad_table = home_squad_table if is_home_target else away_squad_table
         opp_squad_table = away_squad_table if is_home_target else home_squad_table
 
+        # Detectar quién metió el PRIMER GOL del partido revisando el primer evento de gol
+        first_goal_team = scorers[0]["team"] if len(scorers) > 0 else None
+        my_abbr_clean = home_abbr if is_home_target else away_abbr
+        my_name_clean = home_name if is_home_target else away_name
+
+        scored_first = 0
+        conceded_first = 0
+        if first_goal_team:
+            if my_abbr_clean in first_goal_team or my_name_clean in first_goal_team:
+                scored_first = 1
+            else:
+                conceded_first = 1
+
         parsed_obj = {
             "id": str(event_id),
             "fullDate": date_mx,
@@ -643,6 +656,9 @@ async def parse_past_match_summary(
             "_myPossession": poss_pair[0] if is_home_target else poss_pair[1],
             "_totalGoals": home_score + away_score,
             "_btts": 1 if (home_score > 0 and away_score > 0) else 0,
+            "_scoredFirst": scored_first,
+            "_concededFirst": conceded_first,
+            "_isHomeGame": 1 if is_home_target else 0,
         }
         DEEP_CACHE[cache_key] = parsed_obj
         return parsed_obj
@@ -921,6 +937,56 @@ async def get_match_deep_stats(
     home_cards_avg = round(sum(m.get("_myCards", 0) for m in home_last5) / h_count, 1)
     away_cards_avg = round(sum(m.get("_myCards", 0) for m in away_last5) / a_count, 1)
 
+
+    # 1. CÁLCULO REAL DE QUIÉN METE EL PRIMER GOL DEL PARTIDO
+    home_scored_first_rate = round(sum(m.get("_scoredFirst", 0) for m in home_last5) / h_count * 100)
+    away_scored_first_rate = round(sum(m.get("_scoredFirst", 0) for m in away_last5) / a_count * 100)
+    home_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in home_last5) / h_count * 100)
+    away_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in away_last5) / a_count * 100)
+
+    # Probabilidad combinada de abrir el marcador (cruza cuántas veces anota primero el local vs cuántas veces recibe primero el visitante)
+    raw_home_first_goal = round((home_scored_first_rate * 0.6) + (away_conceded_first_rate * 0.4))
+    raw_away_first_goal = round((away_scored_first_rate * 0.6) + (home_conceded_first_rate * 0.4))
+    total_fg = max(1, raw_home_first_goal + raw_away_first_goal)
+    home_first_goal_prob = min(82, max(18, round((raw_home_first_goal / total_fg) * 92)))
+    away_first_goal_prob = min(82, max(15, round((raw_away_first_goal / total_fg) * 92)))
+    no_goal_prob = max(2, 100 - home_first_goal_prob - away_first_goal_prob)
+
+    # 2. PORCENTAJE DE VICTORIA SUPER CONFIABLE (Pondera Resultados L5 + Factor Local/Visita + Diferencial de Goles y Tiros al Arco)
+    home_wins = sum(1 for m in home_last5 if m["result"] == "W")
+    home_draws = sum(1 for m in home_last5 if m["result"] == "D")
+    away_wins = sum(1 for m in away_last5 if m["result"] == "W")
+    away_draws = sum(1 for m in away_last5 if m["result"] == "D")
+    away_losses = sum(1 for m in away_last5 if m["result"] == "L")
+
+    home_strength = (
+        ((home_wins / h_count) * 45)
+        + ((away_losses / a_count) * 25)
+        + (min(20, max(0, (home_goals_avg - away_goals_avg + 1.2) * 8)))
+        + (min(10, max(0, (home_sot_avg - away_sot_avg + 1.5) * 2.5)))
+        + 6  # Bono táctico de localía
+    )
+    away_strength = (
+        ((away_wins / a_count) * 45)
+        + (((h_count - home_wins - home_draws) / h_count) * 25)
+        + (min(20, max(0, (away_goals_avg - home_goals_avg + 1.0) * 8)))
+        + (min(10, max(0, (away_sot_avg - home_sot_avg + 1.0) * 2.5)))
+    )
+    draw_strength = 22 + (((home_draws / h_count) + (away_draws / a_count)) * 18)
+
+    total_str = max(1.0, home_strength + away_strength + draw_strength)
+    win_prob_home = round((home_strength / total_str) * 100)
+    win_prob_away = round((away_strength / total_str) * 100)
+    win_prob_draw = max(10, 100 - win_prob_home - win_prob_away)
+
+    # 3. CALIBRADOR DE MERCADOS Y MOMIOS DISPONIBLES EN DRAFTEA
+    # En Draftea, si el promedio de goles esperados del partido es >= 2.0 o Over 1.5 >= 65%,
+    # la línea "+0.5 Goles" está cerrada/bloqueada y la línea base abierta es "+1.5 Goles" y "-3.5 Goles".
+    expected_total_goals = round(home_goals_avg + away_goals_avg, 2)
+    draftea_min_goal_line = 1.5 if (expected_total_goals >= 1.85 or over15 >= 62) else 0.5
+    draftea_under_safe_line = 3.5 if expected_total_goals <= 3.1 else 4.5
+    under35_prob = round(sum(1 for m in combined_matches if m["_totalGoals"] <= 3) / total_m * 100)
+
     agg_players, agg_gks = {}, {}
 
     def process_team_history(match_list, target_id, team_short, is_home_team):
@@ -1092,10 +1158,11 @@ async def get_match_deep_stats(
             "away": away_tactics,
             "matchScript": match_script
         },
-        "statsL10": {
+            "statsL10": {
             "over05Goals": over05,
             "over15Goals": over15,
             "over25Goals": over25,
+            "under35Goals": under35_prob,
             "btts": btts,
             "homeGoalsAvg": home_goals_avg,
             "awayGoalsAvg": away_goals_avg,
@@ -1107,7 +1174,19 @@ async def get_match_deep_stats(
             "awayCornersAvg": away_corners_avg,
             "homeCardsAvg": home_cards_avg,
             "awayCardsAvg": away_cards_avg,
-            "cornersAvg": round(home_corners_avg + away_corners_avg, 1)
+            "cornersAvg": round(home_corners_avg + away_corners_avg, 1),
+            # Nuevos indicadores de Victoria Local/Visita, Primer Gol y Líneas Oficiales Draftea:
+            "winProbHome": win_prob_home,
+            "winProbDraw": win_prob_draw,
+            "winProbAway": win_prob_away,
+            "homeFirstGoalProb": home_first_goal_prob,
+            "awayFirstGoalProb": away_first_goal_prob,
+            "noGoalProb": no_goal_prob,
+            "homeScoredFirstRate": home_scored_first_rate,
+            "awayScoredFirstRate": away_scored_first_rate,
+            "drafteaMinGoalLine": draftea_min_goal_line,
+            "drafteaUnderSafeLine": draftea_under_safe_line,
+            "expectedTotalGoals": expected_total_goals
         },
         "keyPlayers": key_players_list,
         "goalkeepers": goalkeepers_list
@@ -1550,7 +1629,7 @@ async def auto_verify_tickets(payload: dict):
         "ok": True,
         "updated": updated_any,
         "tickets": tickets,
-        "learningLogs": learning_logs[:25]
+        "learningLogs": learning_logs
     }
 
 

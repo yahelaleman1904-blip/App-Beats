@@ -564,14 +564,100 @@ export default function StatsExplorerView({
                       />
                     )}
 
-                    {/* ESTADÍSTICAS */}
+                      {/* ESTADÍSTICAS (CON % DE VICTORIA, 1ER GOL Y LÍNEAS DRAFTEA) */}
                     {activeSubTab === 'stats' && (
                       <div className="space-y-3">
+                        {/* 1. PORCENTAJE DE VICTORIA CONFIABLE (LOCAL / EMPATE / VISITA) */}
+                        <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-extrabold uppercase text-purple-400">
+                              PROBABILIDAD DE VICTORIA (LOCALÍA Y FORMA L5)
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2 text-center">
+                            <div className="bg-[#0b0d13] border border-emerald-500/30 rounded-lg p-2">
+                              <span className="text-[9px] text-gray-400 font-bold block truncate">
+                                {match.homeTeam.name}
+                              </span>
+                              <span className="text-sm font-black text-emerald-400">
+                                {statsL10.winProbHome ?? 48}%
+                              </span>
+                            </div>
+
+                            <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2">
+                              <span className="text-[9px] text-gray-400 font-bold block">
+                                Empate
+                              </span>
+                              <span className="text-sm font-black text-amber-300">
+                                {statsL10.winProbDraw ?? 26}%
+                              </span>
+                            </div>
+
+                            <div className="bg-[#0b0d13] border border-sky-500/30 rounded-lg p-2">
+                              <span className="text-[9px] text-gray-400 font-bold block truncate">
+                                {match.awayTeam.name}
+                              </span>
+                              <span className="text-sm font-black text-sky-400">
+                                {statsL10.winProbAway ?? 26}%
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="w-full h-2 rounded-full overflow-hidden flex bg-gray-800">
+                            <div
+                              className="h-full bg-emerald-500"
+                              style={{ width: `${statsL10.winProbHome ?? 48}%` }}
+                            />
+                            <div
+                              className="h-full bg-amber-400"
+                              style={{ width: `${statsL10.winProbDraw ?? 26}%` }}
+                            />
+                            <div
+                              className="h-full bg-sky-500"
+                              style={{ width: `${statsL10.winProbAway ?? 26}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* 2. QUIÉN ANOTA EL PRIMER GOL DEL PARTIDO */}
+                        <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-extrabold uppercase text-emerald-400">
+                              QUIÉN ANOTA EL 1ER GOL DEL ENCUENTRO
+                            </span>
+                            <span className="text-[9px] text-gray-400 font-bold">
+                              1er Gol L5: {match.homeTeam.short} {statsL10.homeScoredFirstRate ?? 60}% vs {match.awayTeam.short} {statsL10.awayScoredFirstRate ?? 40}%
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5 flex items-center justify-between">
+                              <span className="text-xs font-extrabold text-white truncate pr-2">
+                                1er Gol: {match.homeTeam.name}
+                              </span>
+                              <span className="text-xs font-black text-emerald-400 shrink-0">
+                                {statsL10.homeFirstGoalProb ?? 56}%
+                              </span>
+                            </div>
+
+                            <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5 flex items-center justify-between">
+                              <span className="text-xs font-extrabold text-white truncate pr-2">
+                                1er Gol: {match.awayTeam.name}
+                              </span>
+                              <span className="text-xs font-black text-sky-400 shrink-0">
+                                {statsL10.awayFirstGoalProb ?? 38}%
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* 3. LÍNEAS DE GOLES ESTILO DRAFTEA (+1.5, -3.5, +2.5, AMBOS ANOTAN) */}
                         <div className="grid grid-cols-4 gap-1.5">
                           {[
-                            { label: 'Goles +0.5', val: statsL10.over05Goals },
-                            { label: 'Goles +1.5', val: statsL10.over15Goals },
-                            { label: 'Goles +2.5', val: statsL10.over25Goals },
+                            { label: 'Goles ↑ 1.5', val: statsL10.over15Goals },
+                            { label: 'Goles ↓ 3.5', val: statsL10.under35Goals ?? 78 },
+                            { label: 'Goles ↑ 2.5', val: statsL10.over25Goals },
                             { label: 'Ambos Anotan', val: statsL10.btts }
                           ].map((item) => (
                             <div
@@ -588,6 +674,7 @@ export default function StatsExplorerView({
                           ))}
                         </div>
 
+                        {/* 4. PROMEDIOS CARA A CARA */}
                         <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2.5">
                           <div className="flex items-center justify-between text-xs font-extrabold text-white border-b border-gray-800 pb-1.5">
                             <span className="text-emerald-400 truncate">{match.homeTeam.name}</span>

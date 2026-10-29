@@ -9,7 +9,8 @@ import {
   EyeOff,
   Eye,
   RefreshCw,
-  Upload
+  Upload,
+  MinusCircle
 } from 'lucide-react';
 import { triggerHaptic } from '../utils/haptics';
 import { analyzeDrafteaTicketImage } from '../utils/ticketVisionAnalyzer';
@@ -32,7 +33,12 @@ export default function HistoryVaultView({
 
   useEffect(() => {
     const hasPending = tickets.some((tk) =>
-      tk.legs.some((l) => l.hit === null || l.hit === undefined)
+      tk.legs.some(
+        (l) =>
+          !l.isVoid &&
+          !l.notStarterBadge?.includes('NULO') &&
+          (l.hit === null || l.hit === undefined)
+      )
     );
     if (hasPending && onAutoVerifyTickets) {
       onAutoVerifyTickets();
@@ -44,7 +50,6 @@ export default function HistoryVaultView({
     setExpandedTicketId((prev) => (prev === ticketId ? null : ticketId));
   };
 
-// En src/components/HistoryVaultView.jsx, reemplaza handleAutoAnalyzeImages por esta versión:
   const handleAutoAnalyzeImages = async (e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
@@ -80,7 +85,8 @@ export default function HistoryVaultView({
       e.target.value = '';
     }
   };
-  
+
+  // Cálculo de efectividad excluyendo predicciones NULAS (Jugadores No Titulares / Lesionados)
   const metrics = useMemo(() => {
     const calcByCategory = (cat) => {
       const list = tickets.filter((t) => t.category === cat);
@@ -90,13 +96,18 @@ export default function HistoryVaultView({
       let settledLegs = 0;
 
       list.forEach((tk) => {
-        const hasPending = tk.legs.some((l) => l.hit === null || l.hit === undefined);
-        const allHit = tk.legs.length > 0 && tk.legs.every((l) => l.hit === true);
-        if (!hasPending && tk.legs.length > 0) {
+        const validLegs = tk.legs.filter(
+          (l) => !l.isVoid && !l.notStarterBadge?.includes('NULO')
+        );
+        const hasPending = validLegs.some((l) => l.hit === null || l.hit === undefined);
+        const allHit = validLegs.length > 0 && validLegs.every((l) => l.hit === true);
+
+        if (!hasPending && validLegs.length > 0) {
           settledTickets += 1;
           if (allHit) wonTickets += 1;
         }
-        tk.legs.forEach((l) => {
+
+        validLegs.forEach((l) => {
           if (l.hit === true || l.hit === false) {
             settledLegs += 1;
             if (l.hit === true) hitLegs += 1;
@@ -287,9 +298,16 @@ export default function HistoryVaultView({
       <div className="space-y-2">
         {visibleTickets.map((ticket) => {
           const isExpanded = expandedTicketId === ticket.id;
-          const totalLegs = ticket.legs.length;
-          const hitLegs = ticket.legs.filter((l) => l.hit === true).length;
-          const pendingLegs = ticket.legs.filter((l) => l.hit === null || l.hit === undefined).length;
+
+          // Excluir picks nulos (no titulares / bajas) del conteo del ticket
+          const validTicketLegs = ticket.legs.filter(
+            (l) => !l.isVoid && !l.notStarterBadge?.includes('NULO')
+          );
+          const totalLegs = validTicketLegs.length;
+          const hitLegs = validTicketLegs.filter((l) => l.hit === true).length;
+          const pendingLegs = validTicketLegs.filter(
+            (l) => l.hit === null || l.hit === undefined
+          ).length;
 
           const isTicketWon = totalLegs > 0 && pendingLegs === 0 && hitLegs === totalLegs;
           const isTicketInProgress = pendingLegs > 0;
@@ -429,11 +447,15 @@ export default function HistoryVaultView({
 
                         <div className="ml-2 pl-3.5 border-l-2 border-dashed border-gray-700 space-y-3">
                           {grp.legs.map((leg) => {
-                            const isPending = leg.hit === null || leg.hit === undefined;
-                            const isHit = leg.hit === true;
+                            const isVoid =
+                              Boolean(leg.isVoid) ||
+                              Boolean(leg.notStarterBadge?.includes('NULO'));
+                            const isPending =
+                              !isVoid && (leg.hit === null || leg.hit === undefined);
+                            const isHit = !isVoid && leg.hit === true;
                             const marketUpper = (leg.market || '').toUpperCase();
 
-                            // Detección de mercados binarios (Sí/No) para omitir la barra y contador numérico
+                            // Detectar mercados binarios (Sí/No) que no llevan barra numérica
                             const isBinary =
                               Boolean(leg.isBinaryMarket) ||
                               marketUpper.includes('1ER GOL') ||
@@ -465,11 +487,13 @@ export default function HistoryVaultView({
                                 <div className="flex items-center justify-between gap-2">
                                   <div>
                                     <span className="text-[9px] font-bold uppercase text-gray-400 block">
-                                      {leg.market}
+                                      {leg.market.replace(' BANCA+', '').replace(' B+', '')}
                                     </span>
                                     <p
                                       className={`text-xs font-extrabold ${
-                                        isPending
+                                        isVoid
+                                          ? 'text-gray-400 line-through'
+                                          : isPending
                                           ? 'text-white'
                                           : isHit
                                           ? 'text-emerald-400'
@@ -482,14 +506,18 @@ export default function HistoryVaultView({
 
                                   <div className="flex items-center gap-1.5">
                                     {leg.notStarterBadge && (
-                                      <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-gray-800 text-gray-300">
+                                      <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
                                         {leg.notStarterBadge}
                                       </span>
                                     )}
                                     <span className="text-[11px] font-bold text-gray-400">
                                       {Number(leg.odd).toFixed(2)}x
                                     </span>
-                                    {isPending ? (
+                                    {isVoid ? (
+                                      <span className="text-[9px] font-bold text-gray-300 bg-gray-800 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                        <MinusCircle className="w-3 h-3 text-amber-400" /> Nulo
+                                      </span>
+                                    ) : isPending ? (
                                       <span className="text-[9px] font-bold text-sky-400 bg-sky-500/15 px-2 py-0.5 rounded-full">
                                         En Curso
                                       </span>
@@ -501,7 +529,7 @@ export default function HistoryVaultView({
                                   </div>
                                 </div>
 
-                                {!isPending && !isBinary && (
+                                {!isPending && !isBinary && !isVoid && (
                                   <div className="mt-1.5 relative flex items-center">
                                     <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
                                       <div
@@ -542,7 +570,7 @@ export default function HistoryVaultView({
           REGLAS DE AJUSTE ({learningLogs.length})
         </h3>
 
-        <div className="space-y-1.5">
+        <div className="space-y-1.5 max-h-96 overflow-y-auto pr-1">
           {learningLogs.map((log) => (
             <div
               key={log.id}

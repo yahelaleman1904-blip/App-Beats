@@ -10,12 +10,6 @@ import {
 } from 'lucide-react';
 import { triggerHaptic } from '../utils/haptics';
 
-/**
- * MOTOR DE EVALUACIÓN CONTEXTUAL PROFUNDA (CERO PLANTILLAS FIJAS)
- * Evalúa partido por partido de ambos clubes (Local en casa vs Visitante fuera)
- * y califica 14 mercados oficiales de Draftea según la probabilidad REAL de que ocurran
- * en la línea exacta que Draftea tiene desbloqueada.
- */
 function buildContextualDrafteaPredictions(
   match,
   deepData,
@@ -39,7 +33,7 @@ function buildContextualDrafteaPredictions(
   const homeShort = match.homeTeam.short;
   const awayShort = match.awayTeam.short;
 
-  // 1. MOTOR DE MEMORIA INDIVIDUAL POR CLUB (Aplica aunque enfrenten a un rival distinto hoy)
+  // 1. MEMORIA EVOLUTIVA POR CLUB INDIVIDUAL (SIN VETO: en reserva hasta que las estadísticas favorezcan el mercado)
   const matchClubLogs = (clubNameStr, clubShortStr) => {
     const cName = (clubNameStr || '').toLowerCase();
     const cShort = (clubShortStr || '').toLowerCase();
@@ -54,11 +48,9 @@ function buildContextualDrafteaPredictions(
     });
   };
 
-  // Historial aprendido exclusivo del equipo Local y exclusivo del Visitante
   const homeClubMemory = matchClubLogs(homeName, homeShort);
   const awayClubMemory = matchClubLogs(awayName, awayShort);
 
-  // Vulnerabilidad defensiva del rival en turno (cuántos goles concede el rival cuando juega en esa condición)
   const awayConcedesGoalsAvg =
     recentAway.length > 0
       ? recentAway.reduce((acc, m) => acc + Number(m._oppGoals ?? 1.2), 0) / recentAway.length
@@ -68,8 +60,8 @@ function buildContextualDrafteaPredictions(
       ? recentHome.reduce((acc, m) => acc + Number(m._oppGoals ?? 1.0), 0) / recentHome.length
       : 1.1;
 
-  const homeOpponentWeaknessBonus = awayConcedesGoalsAvg >= 1.5 ? 4 : 0;
-  const awayOpponentWeaknessBonus = homeConcedesGoalsAvg >= 1.5 ? 4 : 0;
+  const homeOpponentWeaknessBonus = awayConcedesGoalsAvg >= 1.5 ? 6 : 0;
+  const awayOpponentWeaknessBonus = homeConcedesGoalsAvg >= 1.5 ? 6 : 0;
 
   const evaluateClubLearnedEdge = (
     clubMemoryList,
@@ -77,24 +69,38 @@ function buildContextualDrafteaPredictions(
     isPlayingAtHome,
     opponentVulnerabilityBonus = 0
   ) => {
-    let probShift = 0;
-    let lineShift = 0;
+    let wins = 0;
+    let fails = 0;
 
     clubMemoryList.forEach((log) => {
       const mText = `${log.marketType || ''} ${log.tag || ''}`.toUpperCase();
       if (!mText.includes(marketKeyword)) return;
-
-      if (log.outcome === 'WIN') {
-        probShift += isPlayingAtHome ? 6 : 4;
-      } else if (log.outcome === 'FAIL') {
-        probShift -= isPlayingAtHome ? 7 : 11;
-        lineShift -= 1;
-      }
+      if (log.outcome === 'WIN') wins += 1;
+      else if (log.outcome === 'FAIL') fails += 1;
     });
 
+    const total = wins + fails;
+    if (total === 0) {
+      return { probShift: opponentVulnerabilityBonus, lineShift: 0 };
+    }
+
+    const empiricalWinRate = (wins / total) * 100;
+    const localBonus = isPlayingAtHome ? 4 : 0;
+
+    // Si ha fallado antes, reduce temporalmente la prioridad para no usarlo en partidos dudosos;
+    // pero si hoy las estadísticas L5 + debilidad del rival + localía son muy altas, vuelve a activarse sin veto.
+    let rawShift =
+      Math.round((empiricalWinRate - 68) * 0.38) + localBonus + opponentVulnerabilityBonus;
+
+    if (fails > wins && opponentVulnerabilityBonus >= 5 && isPlayingAtHome) {
+      rawShift += 6;
+    }
+
+    const lineShift = fails > wins ? -1 : 0;
+
     return {
-      probShift: Math.max(-18, Math.min(14, probShift + opponentVulnerabilityBonus)),
-      lineShift: Math.max(-1, Math.min(1, lineShift))
+      probShift: Math.max(-18, Math.min(18, rawShift)),
+      lineShift
     };
   };
 
@@ -149,7 +155,7 @@ function buildContextualDrafteaPredictions(
 
   const getAdj = (groupKey) => Number(lineAdjustments[`${match.id}_${groupKey}`] || 0);
 
-  // 2. Extraer secuencias reales partido por partido (L5 Local y L5 Visitante)
+  // 2. Secuencias L5 Globales
   const homeSotSeq = recentHome.map((m) => Number(m._mySoT ?? m.stats?.sot?.[0] ?? 5));
   const awaySotSeq = recentAway.map((m) => Number(m._mySoT ?? m.stats?.sot?.[1] ?? 4));
   const homeShotsSeq = recentHome.map((m) => Number(m._myShots ?? m.stats?.shots?.[0] ?? 13));
@@ -174,7 +180,6 @@ function buildContextualDrafteaPredictions(
     return Math.round((hits / seq.length) * 100);
   };
 
-  // 3. Líneas Oficiales Desbloqueadas en Draftea según el promedio real de cada club
   const homeSoTAvg = stats.homeSoTAvg || 5.2;
   const awaySoTAvg = stats.awaySoTAvg || 4.0;
   const homeShotsAvg = stats.homeShotsAvg || 13.5;
@@ -193,7 +198,6 @@ function buildContextualDrafteaPredictions(
     tactical?.away?.parkTheBusRisk ||
     totalGoalsSeq.filter((g) => g <= 1).length >= 4;
 
-  // Identificar favorito real por desempeño Local vs Visita
   const winProbHome = stats.winProbHome ?? 48;
   const winProbAway = stats.winProbAway ?? 26;
   const winProbDraw = stats.winProbDraw ?? 26;
@@ -203,15 +207,23 @@ function buildContextualDrafteaPredictions(
 
   const isHighTensionMatch =
     combinedCardsAvg >= 4.6 ||
-    ['LALIGA', 'LIBERTADORES', 'SUDAMERICANA', 'ARGENTINA', 'LIGA_MX', 'SERIE_A'].includes(
-      match.leagueId
-    );
+    [
+      'LALIGA',
+      'LIBERTADORES',
+      'SUDAMERICANA',
+      'ARGENTINA',
+      'LIGA_MX',
+      'SERIE_A',
+      'COPA_DEL_REY'
+    ].includes(match.leagueId);
 
-  // 4. Evaluar Jugadores Individuales en su LÍNEA REAL ABIERTA DE DRAFTEA
+  // 3. Filtro de jugadores: descarta lesionados/bajas y suplentes habituales
   const evaluatedPlayers = players
     .filter(
       (p) =>
         p.name &&
+        !p.isInjuredOrOut &&
+        p.rotationStatus !== 'ROTACION' &&
         !p.name.includes('Referente') &&
         !p.name.includes('Titular') &&
         !p.name.includes('Goleador')
@@ -247,8 +259,8 @@ function buildContextualDrafteaPredictions(
         openSoTLine,
         openShotsOdd: p.openShotsOdd || (openShotsLine >= 3 ? 1.36 : 1.31),
         openSoTOdd: p.openSoTOdd || (openSoTLine >= 2 ? 1.44 : 1.29),
-        realShotsProb: Math.min(95, Math.max(52, realShotsProb + clubEdge)),
-        realSoTProb: Math.min(95, Math.max(54, realSoTProb + clubEdge))
+        realShotsProb: Math.min(95, Math.max(50, realShotsProb + clubEdge)),
+        realSoTProb: Math.min(95, Math.max(50, realSoTProb + clubEdge))
       };
     });
 
@@ -265,9 +277,6 @@ function buildContextualDrafteaPredictions(
 
   const gk1 = gks[0];
 
-  // =========================================================================
-  // CONSTRUCCIÓN DINÁMICA DE CANDIDATOS PARA ESTE PARTIDO ESPECÍFICO
-  // =========================================================================
   const candidateMarkets = [];
   const favSideTag = favIsHome ? 'HOME' : 'AWAY';
 
@@ -292,7 +301,7 @@ function buildContextualDrafteaPredictions(
     market: 'DOBLE OPORTUNIDAD 90\'',
     selection: dcSelection,
     odd: dcOdd,
-    prob: Math.min(94, Math.max(68, dcProb + getMemoryModifier('DOBLE', favSideTag))),
+    prob: Math.min(95, Math.max(52, dcProb + getMemoryModifier('DOBLE', favSideTag))),
     badge: '90\''
   });
 
@@ -309,7 +318,7 @@ function buildContextualDrafteaPredictions(
     market: 'MONEY LINE (PAGO ANTICIPADO POR 1 GOL) PA(1) 90\'',
     selection: `${favTeam.short} (${favTeam.name})`,
     odd: pa1Odd,
-    prob: Math.min(93, Math.max(62, pa1Prob + getMemoryModifier('PA', favSideTag))),
+    prob: Math.min(94, Math.max(52, pa1Prob + getMemoryModifier('PA', favSideTag))),
     badge: 'PA(1) 90\''
   });
 
@@ -329,11 +338,11 @@ function buildContextualDrafteaPredictions(
     market: 'TARJETAS TOTALES 90\'',
     selection: `↑ ${baseCardLine.toFixed(1)} Tarjetas`,
     odd: Number((1.28 + getAdj('TOTAL_CARDS') * 0.22).toFixed(2)),
-    prob: Math.min(95, Math.max(55, cardsHitPct + tensionBonus + getMemoryModifier('TARJETAS'))),
+    prob: Math.min(95, Math.max(50, cardsHitPct + tensionBonus + getMemoryModifier('TARJETAS'))),
     badge: '90\''
   });
 
-  // D. TOTAL DE GOLES POR EQUIPO LOCAL / VISITANTE (Usa la memoria individual de cada club)
+  // D. TOTAL DE GOLES POR EQUIPO LOCAL / VISITANTE
   const homeTeamOpenGoalLine = Math.max(
     0.5,
     (stats.drafteaHomeTeamGoalLine || (stats.homeGoalsAvg >= 1.65 ? 1.5 : 0.5)) +
@@ -356,7 +365,7 @@ function buildContextualDrafteaPredictions(
     prob: Math.min(
       94,
       Math.max(
-        58,
+        50,
         homeTeamGoalHits + (isOver15Locked ? 6 : 0) + getMemoryModifier('GOLES', 'HOME')
       )
     ),
@@ -382,7 +391,7 @@ function buildContextualDrafteaPredictions(
     odd: Number(
       ((awayTeamOpenGoalLine >= 1.5 ? 1.68 : 1.32) + getAdj('AWAY_TEAM_GOALS') * 0.28).toFixed(2)
     ),
-    prob: Math.min(92, Math.max(55, awayTeamGoalHits + getMemoryModifier('GOLES', 'AWAY'))),
+    prob: Math.min(92, Math.max(50, awayTeamGoalHits + getMemoryModifier('GOLES', 'AWAY'))),
     badge: '90\''
   });
 
@@ -402,7 +411,7 @@ function buildContextualDrafteaPredictions(
       market: 'GOLES TOTALES ↑/↓ 90\'',
       selection: `↓ ${uLine.toFixed(1)}`,
       odd: Number((1.26 - getAdj('TOTAL_GOALS') * 0.15).toFixed(2)),
-      prob: Math.min(94, Math.max(64, underHits + 4 + getMemoryModifier('GOLES', 'BOTH'))),
+      prob: Math.min(94, Math.max(50, underHits + 4 + getMemoryModifier('GOLES', 'BOTH'))),
       badge: '90\''
     });
   } else {
@@ -421,12 +430,12 @@ function buildContextualDrafteaPredictions(
       odd: Number(
         ((baseOverLine >= 2.5 ? 1.52 : 1.28) + getAdj('TOTAL_GOALS') * 0.25).toFixed(2)
       ),
-      prob: Math.min(93, Math.max(54, overHits + getMemoryModifier('GOLES', 'BOTH'))),
+      prob: Math.min(93, Math.max(50, overHits + getMemoryModifier('GOLES', 'BOTH'))),
       badge: '90\''
     });
   }
 
-  // F. TOTAL DE TIROS AL ARCO LOCAL (Con ajuste de línea aprendido del historial individual del club local)
+  // F. TOTAL DE TIROS AL ARCO LOCAL
   const openHomeSotLine = Math.max(
     3,
     (stats.drafteaHomeSoTOpenLine || Math.round(homeSoTAvg - 0.25)) +
@@ -443,12 +452,12 @@ function buildContextualDrafteaPredictions(
     odd: Number((1.42 + getAdj('HOME_TEAM_SOT') * 0.18).toFixed(2)),
     prob: Math.min(
       94,
-      Math.max(52, homeSotRealProb + getMemoryModifier('TIROS AL ARCO', 'HOME'))
+      Math.max(50, homeSotRealProb + getMemoryModifier('TIROS AL ARCO', 'HOME'))
     ),
     badge: '90\''
   });
 
-  // G. TOTAL DE TIROS AL ARCO VISITANTE (Con ajuste de línea aprendido del historial individual del club visitante)
+  // G. TOTAL DE TIROS AL ARCO VISITANTE
   const openAwaySotLine = Math.max(
     2,
     (stats.drafteaAwaySoTOpenLine || Math.round(awaySoTAvg - 0.25)) +
@@ -485,7 +494,7 @@ function buildContextualDrafteaPredictions(
     market: 'CÓRNERS TOTALES 90\'',
     selection: `↑ ${baseCornerLine.toFixed(1)} Tiros de Esquina`,
     odd: Number((1.33 + getAdj('TOTAL_CORNERS') * 0.18).toFixed(2)),
-    prob: Math.min(94, Math.max(56, cornersRealProb + getMemoryModifier('CORNERS', 'BOTH'))),
+    prob: Math.min(94, Math.max(50, cornersRealProb + getMemoryModifier('CORNERS', 'BOTH'))),
     badge: '90\''
   });
 
@@ -501,7 +510,7 @@ function buildContextualDrafteaPredictions(
       prob: Math.min(
         92,
         Math.max(
-          55,
+          50,
           bttsRealProb + (expectedGoals >= 2.8 ? 6 : 0) + getMemoryModifier('AMBOS', 'BOTH')
         )
       ),
@@ -527,26 +536,26 @@ function buildContextualDrafteaPredictions(
     odd: 1.46,
     prob: Math.min(
       90,
-      Math.max(54, firstGoalLeaderProb + 12 + getMemoryModifier('1ER GOL', firstGoalSide))
+      Math.max(50, firstGoalLeaderProb + 12 + getMemoryModifier('1ER GOL', firstGoalSide))
     ),
     badge: '90\''
   });
 
-  // K. TIROS AL ARCO JUGADOR BANCA+
+  // K. TIROS AL ARCO 90' (SIN BANCA+)
   if (topSotPlayer) {
     const p1Line = Math.max(1, topSotPlayer.openSoTLine + getAdj('PLAYER_1_SOT'));
     candidateMarkets.push({
       categoryGroup: 'PLAYER_1_SOT',
       adjustable: true,
-      market: 'TIROS AL ARCO BANCA+ 90\'',
+      market: 'TIROS AL ARCO 90\'',
       selection: `${topSotPlayer.name} ${topSotPlayer.team} | ${p1Line}.0+`,
       odd: Number((topSotPlayer.openSoTOdd + getAdj('PLAYER_1_SOT') * 0.28).toFixed(2)),
       prob: topSotPlayer.realSoTProb,
-      badge: 'BANCA+ 90\''
+      badge: '90\''
     });
   }
 
-  // L. TIROS TOTALES JUGADOR BANCA+
+  // L. TIROS 90' (SIN BANCA+)
   if (topTotalShotsPlayer) {
     const p2Line = Math.max(
       1,
@@ -555,27 +564,27 @@ function buildContextualDrafteaPredictions(
     candidateMarkets.push({
       categoryGroup: 'PLAYER_2_SHOTS',
       adjustable: true,
-      market: 'TIROS BANCA+ 90\'',
+      market: 'TIROS 90\'',
       selection: `${topTotalShotsPlayer.name} ${topTotalShotsPlayer.team} | ${p2Line}.0+`,
       odd: Number(
         (topTotalShotsPlayer.openShotsOdd + getAdj('PLAYER_2_SHOTS') * 0.25).toFixed(2)
       ),
       prob: topTotalShotsPlayer.realShotsProb,
-      badge: 'B+ 90\''
+      badge: '90\''
     });
   }
 
-  // M. SEGUNDO TIRADOR AL ARCO
+  // M. SEGUNDO TIRADOR AL ARCO (SIN BANCA+)
   if (secondSotPlayer && secondSotPlayer.name !== topSotPlayer?.name) {
     const p3Line = Math.max(1, secondSotPlayer.openSoTLine + getAdj('PLAYER_3_SOT'));
     candidateMarkets.push({
       categoryGroup: 'PLAYER_3_SOT',
       adjustable: true,
-      market: 'TIROS AL ARCO BANCA+ 90\'',
+      market: 'TIROS AL ARCO 90\'',
       selection: `${secondSotPlayer.name} ${secondSotPlayer.team} | ${p3Line}.0+`,
       odd: Number((secondSotPlayer.openSoTOdd + 0.06 + getAdj('PLAYER_3_SOT') * 0.28).toFixed(2)),
-      prob: Math.min(92, Math.max(54, secondSotPlayer.realSoTProb)),
-      badge: 'BANCA+ 90\''
+      prob: Math.min(92, Math.max(50, secondSotPlayer.realSoTProb)),
+      badge: '90\''
     });
   }
 
@@ -604,7 +613,7 @@ function buildContextualDrafteaPredictions(
       odd: Number((1.36 + getAdj('GK_SAVES') * 0.20).toFixed(2)),
       prob: Math.min(
         95,
-        Math.max(55, gkHits + siegeBonus + getMemoryModifier('ATAJADAS', gkSide))
+        Math.max(50, gkHits + siegeBonus + getMemoryModifier('ATAJADAS', gkSide))
       ),
       badge: '90\''
     });
@@ -627,14 +636,11 @@ function buildContextualDrafteaPredictions(
     odd: Number((1.34 + getAdj('HOME_TEAM_SHOTS') * 0.15).toFixed(2)),
     prob: Math.min(
       93,
-      Math.max(54, homeShotsRealProb + getMemoryModifier('TIROS EQUIPO', 'HOME'))
+      Math.max(50, homeShotsRealProb + getMemoryModifier('TIROS EQUIPO', 'HOME'))
     ),
     badge: '90\''
   });
 
-  // =========================================================================
-  // AJUSTE SEGÚN EL NIVEL ELEGIDO Y ORDENAMIENTO DINÁMICO POR PARTIDO
-  // =========================================================================
   const calibratedPool = candidateMarkets.map((item) => {
     if (riskLevel === 'SEGURO') {
       return item;
@@ -903,6 +909,7 @@ export default function BeatsBuilderView({
 
           {selectedMatchIds.length > 0 && (
             <button
+              type="button"
               onClick={() => {
                 triggerHaptic('light');
                 setSelectedMatchIds([]);
@@ -916,6 +923,7 @@ export default function BeatsBuilderView({
 
         <div className="grid grid-cols-3 gap-2">
           <button
+            type="button"
             onClick={handlePreset18EsMx}
             className="p-2.5 rounded-xl bg-gradient-to-br from-purple-900/40 to-[#0b0d13] border border-purple-500/40 hover:border-purple-400 text-center transition-all cursor-pointer"
           >
@@ -928,6 +936,7 @@ export default function BeatsBuilderView({
           </button>
 
           <button
+            type="button"
             onClick={handlePreset2BigGames}
             className="p-2.5 rounded-xl bg-gradient-to-br from-emerald-900/35 to-[#0b0d13] border border-emerald-500/40 hover:border-emerald-400 text-center transition-all cursor-pointer"
           >
@@ -940,6 +949,7 @@ export default function BeatsBuilderView({
           </button>
 
           <button
+            type="button"
             onClick={handlePreset22Dreamer}
             className="p-2.5 rounded-xl bg-gradient-to-br from-amber-900/30 to-[#0b0d13] border border-amber-500/40 hover:border-amber-400 text-center transition-all cursor-pointer"
           >
@@ -966,6 +976,7 @@ export default function BeatsBuilderView({
               className="w-12 bg-[#141824] border border-gray-700 rounded-lg px-1.5 py-1 text-xs font-black text-center text-white"
             />
             <button
+              type="button"
               onClick={handleAutoPickFromActiveFilters}
               className="bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-extrabold px-3 py-1 rounded-lg cursor-pointer"
             >
@@ -1019,6 +1030,7 @@ export default function BeatsBuilderView({
                 return (
                   <button
                     key={lvl.id}
+                    type="button"
                     onClick={() => {
                       triggerHaptic('light');
                       setRiskLevel(lvl.id);
@@ -1075,12 +1087,12 @@ export default function BeatsBuilderView({
                     <div className="flex items-center gap-2">
                       <img src={match.homeTeam.logo} alt="" className="w-4 h-4 object-contain shrink-0" />
                       <span className="text-xs font-extrabold text-white truncate">
-                        {match.homeTeam.name}
+                        {match.homeTeam.rank ? `#${match.homeTeam.rank} ` : ''}{match.homeTeam.name}
                       </span>
                       <span className="text-[10px] text-gray-500 font-bold">vs</span>
                       <img src={match.awayTeam.logo} alt="" className="w-4 h-4 object-contain shrink-0" />
                       <span className="text-xs font-extrabold text-white truncate">
-                        {match.awayTeam.name}
+                        {match.awayTeam.rank ? `#${match.awayTeam.rank} ` : ''}{match.awayTeam.name}
                       </span>
                     </div>
                   </div>
@@ -1147,6 +1159,7 @@ export default function BeatsBuilderView({
                     </span>
                     {effectivePicksPerMatch === 1 && (
                       <button
+                        type="button"
                         onClick={() => handleCycleMatchPick(match.id)}
                         className="flex items-center gap-1 text-[10px] text-purple-400 hover:text-purple-300 font-bold cursor-pointer"
                       >
@@ -1158,11 +1171,15 @@ export default function BeatsBuilderView({
                   <div className="space-y-1 mb-2.5">
                     <div className="flex items-center gap-2">
                       <img src={match.homeTeam.logo} alt="" className="w-4 h-4 object-contain" />
-                      <span className="text-xs font-bold text-white">{match.homeTeam.name}</span>
+                      <span className="text-xs font-bold text-white">
+                        {match.homeTeam.rank ? `#${match.homeTeam.rank} ` : ''}{match.homeTeam.name}
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <img src={match.awayTeam.logo} alt="" className="w-4 h-4 object-contain" />
-                      <span className="text-xs font-bold text-white">{match.awayTeam.name}</span>
+                      <span className="text-xs font-bold text-white">
+                        {match.awayTeam.rank ? `#${match.awayTeam.rank} ` : ''}{match.awayTeam.name}
+                      </span>
                     </div>
                   </div>
 
@@ -1222,6 +1239,7 @@ export default function BeatsBuilderView({
           {generatedTicket.legs.length > 0 && (
             <div className="p-3 bg-[#141824] border-t border-gray-800">
               <button
+                type="button"
                 onClick={handleSaveTicket}
                 className="w-full py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow cursor-pointer"
               >

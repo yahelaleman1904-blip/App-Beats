@@ -21,9 +21,9 @@ export default function StatsExplorerView({
   onEnsureDeepStats
 }) {
   const [expandedMatchId, setExpandedMatchId] = useState(null);
-  const [activeSubTab, setActiveSubTab] = useState('general');
+  // Abre directamente en 'stats' (eliminada la pestaña 'general')
+  const [activeSubTab, setActiveSubTab] = useState('stats');
   const [selectedPastMatch, setSelectedPastMatch] = useState(null);
-  const [expandedGkKey, setExpandedGkKey] = useState(null);
   const [expandedPlayerId, setExpandedPlayerId] = useState(null);
   const [playerTeamFilter, setPlayerTeamFilter] = useState('ALL');
   const [modalPlayer, setModalPlayer] = useState(null);
@@ -37,7 +37,7 @@ export default function StatsExplorerView({
     }
 
     setExpandedMatchId(match.id);
-    setActiveSubTab('general');
+    setActiveSubTab('stats');
     setSelectedPastMatch(null);
     setPlayerTeamFilter('ALL');
     await onEnsureDeepStats(match);
@@ -54,13 +54,6 @@ export default function StatsExplorerView({
     return 'bg-red-500/20 text-red-400 border-red-500/40';
   };
 
-  const stripEmojis = (str) =>
-    String(str || '')
-      .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '')
-      .trim();
-
-  // PUNTO 2 CORREGIDO: Extraer de un partido pasado ÚNICAMENTE la lista de jugadores del club buscado
-  // (y NUNCA los del otro rival contra el que jugó ese día, como STR)
   const extractOnlyClubSquad = (pastMatchObj, clubName, clubShort) => {
     if (!pastMatchObj) return [];
     if (Array.isArray(pastMatchObj.mySquad) && pastMatchObj.mySquad.length > 0) {
@@ -80,8 +73,7 @@ export default function StatsExplorerView({
       cName.includes(pmHomeName.slice(0, 5));
 
     const candidateList = wasHomeInThatGame ? sq.home || [] : sq.away || [];
-    // Doble filtro de seguridad por siglas del equipo
-    const strictFiltered = ( sq.all || candidateList ).filter(
+    const strictFiltered = (sq.all || candidateList).filter(
       (p) => (p.team || '').toLowerCase() === cShort
     );
     return strictFiltered.length > 0 ? strictFiltered : candidateList;
@@ -102,13 +94,31 @@ export default function StatsExplorerView({
         const deep = deepDataMap[match.id];
         const recentHome = deep?.recentMatches?.home || [];
         const recentAway = deep?.recentMatches?.away || [];
-        const tactical = deep?.tacticalAnalysis;
         const confirmedLineup = deep?.confirmedLineup;
-        const statsL10 = deep?.statsL10 || match.statsL10;
+        const statsL10 = deep?.statsL10 || match.statsL10 || {};
         const keyPlayers =
           deep?.keyPlayers?.length > 0 ? deep.keyPlayers : match.keyPlayers || [];
-        const goalkeepers = deep?.goalkeepers || [];
         const isFetchingThis = loadingDeepId === match.id;
+
+        // Obtener posición en la tabla (desde el partido o desde el historial reciente)
+        const homeRank =
+          match.homeTeam.rank || recentHome[0]?.homeRank || null;
+        const awayRank =
+          match.awayTeam.rank || recentAway[0]?.awayRank || null;
+
+        // Pronóstico de Tiros al Arco y Tiros Totales de Equipo (Calibrado con opciones reales de Draftea)
+        const homeSoTPred =
+          statsL10.drafteaHomeSoTOpenLine ||
+          Math.max(2, Math.round((statsL10.homeSoTAvg || 4.5) - 0.3));
+        const awaySoTPred =
+          statsL10.drafteaAwaySoTOpenLine ||
+          Math.max(2, Math.round((statsL10.awaySoTAvg || 3.8) - 0.3));
+        const homeShotsPred =
+          statsL10.drafteaHomeShotsOpenLine ||
+          Math.max(9, Math.round((statsL10.homeShotsAvg || 13) - 1.2));
+        const awayShotsPred =
+          statsL10.drafteaAwayShotsOpenLine ||
+          Math.max(8, Math.round((statsL10.awayShotsAvg || 11) - 1.2));
 
         const filteredPlayers = keyPlayers.filter((p) => {
           if (playerTeamFilter === 'HOME') return p.team === match.homeTeam.short;
@@ -116,7 +126,6 @@ export default function StatsExplorerView({
           return true;
         });
 
-        // PUNTO 2 CORREGIDO: En "Convocados" del partido solo deben estar los jugadores de match.homeTeam y match.awayTeam
         const homeOnlySquad = extractOnlyClubSquad(
           recentHome[0],
           match.homeTeam.name,
@@ -140,6 +149,8 @@ export default function StatsExplorerView({
             }
           : null;
 
+        const healthyTopPlayer = keyPlayers.find((p) => !p.isInjuredOrOut) || keyPlayers[0];
+
         return (
           <div
             key={match.id}
@@ -151,7 +162,7 @@ export default function StatsExplorerView({
                 : 'bg-[#141824]/80 border-gray-800/90 hover:border-gray-700'
             }`}
           >
-            {/* CABECERA COMPACTA DEL PARTIDO */}
+            {/* CABECERA DEL ENFRENTAMIENTO CON POSICIÓN EN LA TABLA (#) */}
             <div
               onClick={() => handleToggleMatch(match)}
               className="p-3 cursor-pointer select-none"
@@ -188,9 +199,16 @@ export default function StatsExplorerView({
                     className="w-7 h-7 object-contain shrink-0"
                   />
                   <div className="min-w-0">
-                    <p className="text-xs sm:text-sm font-extrabold text-white truncate">
-                      {match.homeTeam.name}
-                    </p>
+                    <div className="flex items-center gap-1.5">
+                      {homeRank && (
+                        <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shrink-0">
+                          #{homeRank}
+                        </span>
+                      )}
+                      <p className="text-xs sm:text-sm font-extrabold text-white truncate">
+                        {match.homeTeam.name}
+                      </p>
+                    </div>
                     <span className="text-[9px] text-emerald-400 font-bold block">
                       LOCAL
                     </span>
@@ -205,9 +223,16 @@ export default function StatsExplorerView({
 
                 <div className="col-span-3 flex items-center justify-end gap-2 text-right min-w-0">
                   <div className="min-w-0">
-                    <p className="text-xs sm:text-sm font-extrabold text-white truncate">
-                      {match.awayTeam.name}
-                    </p>
+                    <div className="flex items-center justify-end gap-1.5">
+                      <p className="text-xs sm:text-sm font-extrabold text-white truncate">
+                        {match.awayTeam.name}
+                      </p>
+                      {awayRank && (
+                        <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 shrink-0">
+                          #{awayRank}
+                        </span>
+                      )}
+                    </div>
                     <span className="text-[9px] text-sky-400 font-bold block">
                       VISITANTE
                     </span>
@@ -222,9 +247,9 @@ export default function StatsExplorerView({
 
               <div className="mt-2 pt-2 border-t border-gray-800/60 flex items-center justify-between text-[11px]">
                 <span className="text-emerald-400 font-bold truncate">
-                  {keyPlayers?.[0]
-                    ? `${keyPlayers[0].name} (${keyPlayers[0].team}) ${keyPlayers[0].propLine}`
-                    : match.aiTopSignal}
+                  {healthyTopPlayer
+                    ? `${healthyTopPlayer.name} (${healthyTopPlayer.team}) ${healthyTopPlayer.propLine}`
+                    : match.aiTopSignal.replace(' B+', '')}
                 </span>
                 <span className="text-[10px] text-gray-400 font-bold shrink-0 ml-2">
                   {isExpanded ? 'Cerrar' : 'Detalles'}
@@ -232,21 +257,21 @@ export default function StatsExplorerView({
               </div>
             </div>
 
-            {/* CONTENIDO DESPLEGABLE */}
+            {/* CONTENIDO DESPLEGABLE (ESTADÍSTICAS ES EL PRIMER BLOQUE, GENERAL ELIMINADO) */}
             {isExpanded && (
               <div className="border-t border-gray-800 bg-[#0e121b] p-3 space-y-3">
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
                   {[
-                    { id: 'general', label: 'General' },
+                    { id: 'stats', label: 'Estadísticas' },
                     { id: 'lineups', label: 'Alineaciones' },
                     { id: 'squad', label: 'Convocados' },
-                    { id: 'stats', label: 'Estadísticas' },
                     { id: 'last5', label: 'Últimos 5' }
                   ].map((tab) => {
                     const active = activeSubTab === tab.id;
                     return (
                       <button
                         key={tab.id}
+                        type="button"
                         onClick={() => {
                           triggerHaptic('light');
                           setActiveSubTab(tab.id);
@@ -270,315 +295,19 @@ export default function StatsExplorerView({
                   </div>
                 ) : (
                   <>
-                    {/* GENERAL */}
-                    {activeSubTab === 'general' && (
-                      <div className="space-y-3">
-                        {tactical && (
-                          <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2.5">
-                            <span className="text-[10px] font-extrabold text-indigo-300 uppercase block">
-                              ANÁLISIS TÁCTICO
-                            </span>
-
-                            <div className="grid grid-cols-2 gap-2 text-xs">
-                              <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5">
-                                <span className="text-[10px] font-bold text-emerald-400 block truncate">
-                                  {match.homeTeam.name}
-                                </span>
-                                <span className="font-extrabold text-white text-[11px] block mt-0.5">
-                                  {stripEmojis(tactical.home.styleTag)}
-                                </span>
-                                <p className="text-[10px] text-gray-400 mt-1 leading-snug">
-                                  {stripEmojis(tactical.home.summary)}
-                                </p>
-                              </div>
-
-                              <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5">
-                                <span className="text-[10px] font-bold text-sky-400 block truncate">
-                                  {match.awayTeam.name}
-                                </span>
-                                <span className="font-extrabold text-white text-[11px] block mt-0.5">
-                                  {stripEmojis(tactical.away.styleTag)}
-                                </span>
-                                <p className="text-[10px] text-gray-400 mt-1 leading-snug">
-                                  {stripEmojis(tactical.away.summary)}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2.5">
-                          <div className="flex items-center justify-between">
-                            <h4 className="text-[11px] font-extrabold text-white uppercase">
-                              JUGADORES
-                            </h4>
-
-                            <div className="flex items-center gap-1 bg-[#0b0d13] p-0.5 rounded-lg border border-gray-800 text-[10px] font-bold">
-                              <button
-                                onClick={() => setPlayerTeamFilter('ALL')}
-                                className={`px-2 py-0.5 rounded cursor-pointer ${
-                                  playerTeamFilter === 'ALL'
-                                    ? 'bg-purple-600 text-white'
-                                    : 'text-gray-400'
-                                }`}
-                              >
-                                Todos
-                              </button>
-                              <button
-                                onClick={() => setPlayerTeamFilter('HOME')}
-                                className={`px-2 py-0.5 rounded cursor-pointer ${
-                                  playerTeamFilter === 'HOME'
-                                    ? 'bg-purple-600 text-white'
-                                    : 'text-gray-400'
-                                }`}
-                              >
-                                {match.homeTeam.short}
-                              </button>
-                              <button
-                                onClick={() => setPlayerTeamFilter('AWAY')}
-                                className={`px-2 py-0.5 rounded cursor-pointer ${
-                                  playerTeamFilter === 'AWAY'
-                                    ? 'bg-purple-600 text-white'
-                                    : 'text-gray-400'
-                                }`}
-                              >
-                                {match.awayTeam.short}
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="divide-y divide-gray-800/80">
-                            {filteredPlayers.map((player) => {
-                              const isRotationRisk = player.rotationStatus === 'ROTACION';
-                              const pKey = `${match.id}-${player.id}`;
-                              const isPlayerOpen = expandedPlayerId === pKey;
-
-                              return (
-                                <div
-                                  key={pKey}
-                                  onClick={() => {
-                                    triggerHaptic('light');
-                                    setExpandedPlayerId(isPlayerOpen ? null : pKey);
-                                  }}
-                                  className="py-2.5 first:pt-1 last:pb-1 cursor-pointer"
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="min-w-0">
-                                      <div className="flex items-center gap-1.5">
-                                        <span className="text-xs font-extrabold text-white truncate">
-                                          {player.name}
-                                        </span>
-                                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-gray-800 text-gray-300">
-                                          {player.team} • {player.pos}
-                                        </span>
-                                        <span
-                                          className={`text-[9px] font-black px-1.5 py-0.2 rounded ${
-                                            isRotationRisk
-                                              ? 'bg-amber-500/20 text-amber-300'
-                                              : 'bg-emerald-500/15 text-emerald-300'
-                                          }`}
-                                        >
-                                          {isRotationRisk ? 'Rotación' : 'Titular'}
-                                        </span>
-                                      </div>
-
-                                      <div className="flex items-center gap-2.5 text-[10px] text-gray-400 mt-1">
-                                        <span>
-                                          Al Arco/J: <strong className="text-emerald-400">{player.avgSoT}</strong>
-                                        </span>
-                                        <span>
-                                          Tiros/J: <strong className="text-white">{player.avgShots}</strong>
-                                        </span>
-                                        {player.totalSoTL5 !== undefined && (
-                                          <span>
-                                            L5: <strong className="text-purple-300">{player.totalSoTL5} al arco</strong>
-                                          </span>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    <div className="text-right shrink-0">
-                                      <span className="text-xs font-black text-emerald-400 block">
-                                        {player.propLine}
-                                      </span>
-                                      <span className="text-[10px] text-gray-400">
-                                        {isPlayerOpen ? 'Cerrar' : 'L5'}
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  {isPlayerOpen && player.matchLogs?.length > 0 && (
-                                    <div className="mt-2 bg-[#0b0d13] rounded-lg p-2 border border-gray-800 space-y-1">
-                                      {player.matchLogs.map((log, lIdx) => (
-                                        <div
-                                          key={lIdx}
-                                          className="flex items-center justify-between text-[10px] bg-[#141824] px-2 py-1 rounded"
-                                        >
-                                          <div className="truncate pr-2">
-                                            <span className="font-bold text-gray-200">
-                                              {log.score}
-                                            </span>
-                                            <span className="text-purple-300 ml-1">
-                                              ({log.competition || log.date})
-                                            </span>
-                                          </div>
-                                          <div className="flex items-center gap-2 shrink-0">
-                                            <span className="text-gray-300">
-                                              Tiros: <strong className="text-white">{log.shots}</strong>
-                                            </span>
-                                            <span className="text-emerald-400 font-bold">
-                                              Arco: {log.sot}
-                                            </span>
-                                            {log.goals > 0 && (
-                                              <span className="text-purple-300 font-bold">
-                                                Goles: {log.goals}
-                                              </span>
-                                            )}
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        {goalkeepers.length > 0 && (
-                          <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2">
-                            <h4 className="text-[11px] font-extrabold text-sky-400 uppercase">
-                              PORTEROS
-                            </h4>
-                            <div className="grid grid-cols-2 gap-2">
-                              {goalkeepers.map((gk, idx) => {
-                                const gkKey = `${match.id}-gk-${idx}`;
-                                const isGkOpen = expandedGkKey === gkKey;
-                                return (
-                                  <div
-                                    key={gkKey}
-                                    onClick={() => {
-                                      triggerHaptic('light');
-                                      setExpandedGkKey(isGkOpen ? null : gkKey);
-                                    }}
-                                    className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5 cursor-pointer"
-                                  >
-                                    <div className="flex items-center justify-between gap-1">
-                                      <div className="min-w-0">
-                                        <span className="text-xs font-extrabold text-white block truncate">
-                                          {gk.name}
-                                        </span>
-                                        <span className="text-[10px] text-gray-400">
-                                          {gk.team} • {gk.totalSaves} atajadas L5
-                                        </span>
-                                      </div>
-                                      <span className="text-xs font-black text-sky-400 shrink-0">
-                                        {gk.avgSaves}/J
-                                      </span>
-                                    </div>
-
-                                    {isGkOpen && gk.matchLogs?.length > 0 && (
-                                      <div className="mt-2 pt-2 border-t border-gray-800 space-y-1">
-                                        {gk.matchLogs.map((log, lIdx) => (
-                                          <div
-                                            key={lIdx}
-                                            className="flex justify-between text-[10px] bg-[#141824] px-2 py-1 rounded"
-                                          >
-                                            <span className="text-gray-200 font-semibold truncate">
-                                              {log.score}
-                                            </span>
-                                            <span className="text-sky-400 font-black shrink-0 ml-1">
-                                              {log.saves} ataj.
-                                            </span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* ALINEACIONES */}
-                    {activeSubTab === 'lineups' && (
-                      <div className="bg-[#141824] border border-gray-800 rounded-xl p-3">
-                        {confirmedLineup?.confirmed ? (
-                          <div className="space-y-2.5">
-                            <div className="flex items-center justify-between text-xs font-extrabold text-white">
-                              <span>ALINEACIONES CONFIRMADAS</span>
-                              <span className="text-[10px] text-gray-400">
-                                {confirmedLineup.homeFormation} vs {confirmedLineup.awayFormation}
-                              </span>
-                            </div>
-
-                            <div className="rounded-xl overflow-hidden border border-emerald-700/60 bg-gradient-to-b from-[#256343] via-[#2b724e] to-[#256343]">
-                              <div className="py-3 px-1.5 space-y-3.5 border-b border-white/25">
-                                {confirmedLineup.homeRows.map((row, rIdx) => (
-                                  <div key={rIdx} className="flex items-center justify-around gap-1">
-                                    {row.map((player, pIdx) => (
-                                      <InteractivePitchNode
-                                        key={pIdx}
-                                        player={player}
-                                        onSelectPlayer={setModalPlayer}
-                                      />
-                                    ))}
-                                  </div>
-                                ))}
-                              </div>
-                              <div className="py-3 px-1.5 space-y-3.5">
-                                {confirmedLineup.awayRows.map((row, rIdx) => (
-                                  <div key={rIdx} className="flex items-center justify-around gap-1">
-                                    {row.map((player, pIdx) => (
-                                      <InteractivePitchNode
-                                        key={pIdx}
-                                        player={player}
-                                        onSelectPlayer={setModalPlayer}
-                                      />
-                                    ))}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="py-6 text-center">
-                            <p className="text-xs font-extrabold text-gray-300">
-                              ALINEACIONES NO CONFIRMADAS
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* CONVOCADOS (SOLO JUGADORES DE LOS 2 EQUIPOS QUE JUEGAN) */}
-                    {activeSubTab === 'squad' && (
-                      <SquadConvocadosTable
-                        squadTable={activeSquadTable}
-                        homeName={match.homeTeam.name}
-                        awayName={match.awayTeam.name}
-                        onSelectPlayer={setModalPlayer}
-                      />
-                    )}
-
-                      {/* ESTADÍSTICAS (CON % DE VICTORIA, 1ER GOL Y LÍNEAS DRAFTEA) */}
+                    {/* 1. ESTADÍSTICAS (AHORA ES LA VISTA PRINCIPAL AL ABRIR EL PARTIDO) */}
                     {activeSubTab === 'stats' && (
                       <div className="space-y-3">
-                        {/* 1. PORCENTAJE DE VICTORIA CONFIABLE (LOCAL / EMPATE / VISITA) */}
+                        {/* PROBABILIDAD DE VICTORIA */}
                         <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-extrabold uppercase text-purple-400">
-                              PROBABILIDAD DE VICTORIA (LOCALÍA Y FORMA L5)
-                            </span>
-                          </div>
+                          <span className="text-[10px] font-extrabold uppercase text-purple-400 block">
+                            PROBABILIDAD DE VICTORIA (LOCALÍA Y FORMA L5 GLOBAL)
+                          </span>
 
                           <div className="grid grid-cols-3 gap-2 text-center">
                             <div className="bg-[#0b0d13] border border-emerald-500/30 rounded-lg p-2">
                               <span className="text-[9px] text-gray-400 font-bold block truncate">
-                                {match.homeTeam.name}
+                                {homeRank ? `#${homeRank} ` : ''}{match.homeTeam.name}
                               </span>
                               <span className="text-sm font-black text-emerald-400">
                                 {statsL10.winProbHome ?? 48}%
@@ -596,7 +325,7 @@ export default function StatsExplorerView({
 
                             <div className="bg-[#0b0d13] border border-sky-500/30 rounded-lg p-2">
                               <span className="text-[9px] text-gray-400 font-bold block truncate">
-                                {match.awayTeam.name}
+                                {awayRank ? `#${awayRank} ` : ''}{match.awayTeam.name}
                               </span>
                               <span className="text-sm font-black text-sky-400">
                                 {statsL10.winProbAway ?? 26}%
@@ -620,7 +349,65 @@ export default function StatsExplorerView({
                           </div>
                         </div>
 
-                        {/* 2. QUIÉN ANOTA EL PRIMER GOL DEL PARTIDO */}
+                        {/* NUEVO: PRONÓSTICO DE TIROS Y TIROS AL ARCO POR EQUIPO (CALIBRADO CON DRAFTEA) */}
+                        <div className="bg-[#141824] border border-emerald-500/30 rounded-xl p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-extrabold uppercase text-emerald-400">
+                              PRONÓSTICO DE TIROS POR EQUIPO (LÍNEAS DRAFTEA)
+                            </span>
+                            <span className="text-[9px] text-gray-400 font-bold">
+                              Últimos 5 Globales
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5 space-y-1">
+                              <span className="text-[10px] font-bold text-gray-400 block truncate">
+                                {match.homeTeam.name}
+                              </span>
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-extrabold text-white">
+                                  Tiros al Arco:
+                                </span>
+                                <span className="text-xs font-black text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded">
+                                  +{homeSoTPred}.0 al arco
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-gray-400 font-semibold">
+                                  Tiros Totales:
+                                </span>
+                                <span className="font-black text-gray-200">
+                                  +{homeShotsPred}.0 tiros
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="bg-[#0b0d13] border border-gray-800 rounded-lg p-2.5 space-y-1">
+                              <span className="text-[10px] font-bold text-gray-400 block truncate">
+                                {match.awayTeam.name}
+                              </span>
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-extrabold text-white">
+                                  Tiros al Arco:
+                                </span>
+                                <span className="text-xs font-black text-sky-400 bg-sky-500/15 px-2 py-0.5 rounded">
+                                  +{awaySoTPred}.0 al arco
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-gray-400 font-semibold">
+                                  Tiros Totales:
+                                </span>
+                                <span className="font-black text-gray-200">
+                                  +{awayShotsPred}.0 tiros
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* QUIÉN ANOTA EL PRIMER GOL */}
                         <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-extrabold uppercase text-emerald-400">
@@ -652,7 +439,7 @@ export default function StatsExplorerView({
                           </div>
                         </div>
 
-                        {/* 3. LÍNEAS DE GOLES ESTILO DRAFTEA (+1.5, -3.5, +2.5, AMBOS ANOTAN) */}
+                        {/* LÍNEAS DE GOLES */}
                         <div className="grid grid-cols-4 gap-1.5">
                           {[
                             { label: 'Goles ↑ 1.5', val: statsL10.over15Goals },
@@ -674,12 +461,12 @@ export default function StatsExplorerView({
                           ))}
                         </div>
 
-                        {/* 4. PROMEDIOS CARA A CARA */}
+                        {/* PROMEDIOS CARA A CARA */}
                         <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2.5">
                           <div className="flex items-center justify-between text-xs font-extrabold text-white border-b border-gray-800 pb-1.5">
                             <span className="text-emerald-400 truncate">{match.homeTeam.name}</span>
                             <span className="text-[9px] text-gray-400 uppercase shrink-0 px-2">
-                              PROMEDIOS L5
+                              PROMEDIOS L5 GLOBAL
                             </span>
                             <span className="text-sky-400 truncate">{match.awayTeam.name}</span>
                           </div>
@@ -730,10 +517,216 @@ export default function StatsExplorerView({
                             );
                           })}
                         </div>
+
+                        {/* JUGADORES CLAVE Y ESTADO DE LESIÓN / TITULARIDAD */}
+                        <div className="bg-[#141824] border border-gray-800 rounded-xl p-3 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-[11px] font-extrabold text-white uppercase">
+                              TIRADORES Y DISPONIBILIDAD L5
+                            </h4>
+
+                            <div className="flex items-center gap-1 bg-[#0b0d13] p-0.5 rounded-lg border border-gray-800 text-[10px] font-bold">
+                              <button
+                                type="button"
+                                onClick={() => setPlayerTeamFilter('ALL')}
+                                className={`px-2 py-0.5 rounded cursor-pointer ${
+                                  playerTeamFilter === 'ALL'
+                                    ? 'bg-purple-600 text-white'
+                                    : 'text-gray-400'
+                                }`}
+                              >
+                                Todos
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPlayerTeamFilter('HOME')}
+                                className={`px-2 py-0.5 rounded cursor-pointer ${
+                                  playerTeamFilter === 'HOME'
+                                    ? 'bg-purple-600 text-white'
+                                    : 'text-gray-400'
+                                }`}
+                              >
+                                {match.homeTeam.short}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPlayerTeamFilter('AWAY')}
+                                className={`px-2 py-0.5 rounded cursor-pointer ${
+                                  playerTeamFilter === 'AWAY'
+                                    ? 'bg-purple-600 text-white'
+                                    : 'text-gray-400'
+                                }`}
+                              >
+                                {match.awayTeam.short}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="divide-y divide-gray-800/80">
+                            {filteredPlayers.map((player) => {
+                              const isOut = Boolean(player.isInjuredOrOut);
+                              const isRotationRisk = player.rotationStatus === 'ROTACION';
+                              const pKey = `${match.id}-${player.id}`;
+                              const isPlayerOpen = expandedPlayerId === pKey;
+
+                              return (
+                                <div
+                                  key={pKey}
+                                  onClick={() => {
+                                    triggerHaptic('light');
+                                    setExpandedPlayerId(isPlayerOpen ? null : pKey);
+                                  }}
+                                  className={`py-2.5 first:pt-1 last:pb-1 cursor-pointer ${
+                                    isOut ? 'opacity-60' : ''
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="text-xs font-extrabold text-white truncate">
+                                          {player.name}
+                                        </span>
+                                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-gray-800 text-gray-300">
+                                          {player.team} • {player.pos}
+                                        </span>
+                                        <span
+                                          className={`text-[9px] font-black px-1.5 py-0.2 rounded ${
+                                            isOut
+                                              ? 'bg-red-500/25 text-red-300 border border-red-500/40'
+                                              : isRotationRisk
+                                              ? 'bg-amber-500/20 text-amber-300'
+                                              : 'bg-emerald-500/15 text-emerald-300'
+                                          }`}
+                                        >
+                                          {isOut
+                                            ? 'BAJA / AUSENTE'
+                                            : isRotationRisk
+                                            ? 'Rotación'
+                                            : 'Titular'}
+                                        </span>
+                                      </div>
+
+                                      <div className="flex items-center gap-2.5 text-[10px] text-gray-400 mt-1">
+                                        <span>
+                                          Al Arco/J: <strong className="text-emerald-400">{player.avgSoT}</strong>
+                                        </span>
+                                        <span>
+                                          Tiros/J: <strong className="text-white">{player.avgShots}</strong>
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <div className="text-right shrink-0">
+                                      <span
+                                        className={`text-xs font-black block ${
+                                          isOut ? 'text-red-400 line-through' : 'text-emerald-400'
+                                        }`}
+                                      >
+                                        {player.propLine}
+                                      </span>
+                                      <span className="text-[10px] text-gray-400">
+                                        {isPlayerOpen ? 'Cerrar' : 'L5'}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  {isPlayerOpen && player.matchLogs?.length > 0 && (
+                                    <div className="mt-2 bg-[#0b0d13] rounded-lg p-2 border border-gray-800 space-y-1">
+                                      {player.matchLogs.map((log, lIdx) => (
+                                        <div
+                                          key={lIdx}
+                                          className="flex items-center justify-between text-[10px] bg-[#141824] px-2 py-1 rounded"
+                                        >
+                                          <div className="truncate pr-2">
+                                            <span className="font-bold text-gray-200">
+                                              {log.score}
+                                            </span>
+                                            <span className="text-purple-300 ml-1">
+                                              ({log.competition || log.date})
+                                            </span>
+                                          </div>
+                                          <div className="flex items-center gap-2 shrink-0">
+                                            <span className="text-gray-300">
+                                              Tiros: <strong className="text-white">{log.shots}</strong>
+                                            </span>
+                                            <span className="text-emerald-400 font-bold">
+                                              Arco: {log.sot}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
                     )}
 
-                    {/* PUNTO 1 CORREGIDO: ÚLTIMOS 5 PARTIDOS SIN LA TABLA DE CONVOCADOS ABAJO */}
+                    {/* 2. ALINEACIONES */}
+                    {activeSubTab === 'lineups' && (
+                      <div className="bg-[#141824] border border-gray-800 rounded-xl p-3">
+                        {confirmedLineup?.confirmed ? (
+                          <div className="space-y-2.5">
+                            <div className="flex items-center justify-between text-xs font-extrabold text-white">
+                              <span>ALINEACIONES CONFIRMADAS</span>
+                              <span className="text-[10px] text-gray-400">
+                                {confirmedLineup.homeFormation} vs {confirmedLineup.awayFormation}
+                              </span>
+                            </div>
+
+                            <div className="rounded-xl overflow-hidden border border-emerald-700/60 bg-gradient-to-b from-[#256343] via-[#2b724e] to-[#256343]">
+                              <div className="py-3 px-1.5 space-y-3.5 border-b border-white/25">
+                                {confirmedLineup.homeRows.map((row, rIdx) => (
+                                  <div key={rIdx} className="flex items-center justify-around gap-1">
+                                    {row.map((player, pIdx) => (
+                                      <InteractivePitchNode
+                                        key={pIdx}
+                                        player={player}
+                                        onSelectPlayer={setModalPlayer}
+                                      />
+                                    ))}
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="py-3 px-1.5 space-y-3.5">
+                                {confirmedLineup.awayRows.map((row, rIdx) => (
+                                  <div key={rIdx} className="flex items-center justify-around gap-1">
+                                    {row.map((player, pIdx) => (
+                                      <InteractivePitchNode
+                                        key={pIdx}
+                                        player={player}
+                                        onSelectPlayer={setModalPlayer}
+                                      />
+                                    ))}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="py-6 text-center">
+                            <p className="text-xs font-extrabold text-gray-300">
+                              ALINEACIONES NO CONFIRMADAS
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 3. CONVOCADOS */}
+                    {activeSubTab === 'squad' && (
+                      <SquadConvocadosTable
+                        squadTable={activeSquadTable}
+                        homeName={match.homeTeam.name}
+                        awayName={match.awayTeam.name}
+                        onSelectPlayer={setModalPlayer}
+                      />
+                    )}
+
+                    {/* 4. ÚLTIMOS 5 PARTIDOS CON POSICIÓN EN LA TABLA (#) DE CADA RIVAL */}
                     {activeSubTab === 'last5' && (
                       <div className="space-y-3">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -741,7 +734,7 @@ export default function StatsExplorerView({
                             <div className="flex items-center gap-2 pb-1 border-b border-gray-800">
                               <img src={match.homeTeam.logo} alt="" className="w-4 h-4 object-contain" />
                               <span className="text-xs font-extrabold text-white truncate">
-                                {match.homeTeam.name}
+                                {homeRank ? `#${homeRank} ` : ''}{match.homeTeam.name}
                               </span>
                             </div>
 
@@ -750,6 +743,7 @@ export default function StatsExplorerView({
                               return (
                                 <button
                                   key={pm.id}
+                                  type="button"
                                   onClick={() => handleSelectPastMatch(pm)}
                                   className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
                                     isSelected
@@ -767,10 +761,12 @@ export default function StatsExplorerView({
                                     </span>
                                     <div className="truncate">
                                       <p className="text-[11px] font-bold text-white truncate">
+                                        {pm.homeRank ? <span className="text-emerald-300 font-black">#{pm.homeRank} </span> : null}
                                         {pm.homeName}{' '}
                                         <span className="text-emerald-400 font-black">
                                           {pm.homeScore}-{pm.awayScore}
                                         </span>{' '}
+                                        {pm.awayRank ? <span className="text-sky-300 font-black">#{pm.awayRank} </span> : null}
                                         {pm.awayName}
                                       </p>
                                       <span className="text-[9px] font-bold text-purple-300">
@@ -790,7 +786,7 @@ export default function StatsExplorerView({
                             <div className="flex items-center gap-2 pb-1 border-b border-gray-800">
                               <img src={match.awayTeam.logo} alt="" className="w-4 h-4 object-contain" />
                               <span className="text-xs font-extrabold text-white truncate">
-                                {match.awayTeam.name}
+                                {awayRank ? `#${awayRank} ` : ''}{match.awayTeam.name}
                               </span>
                             </div>
 
@@ -799,6 +795,7 @@ export default function StatsExplorerView({
                               return (
                                 <button
                                   key={pm.id}
+                                  type="button"
                                   onClick={() => handleSelectPastMatch(pm)}
                                   className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
                                     isSelected
@@ -816,10 +813,12 @@ export default function StatsExplorerView({
                                     </span>
                                     <div className="truncate">
                                       <p className="text-[11px] font-bold text-white truncate">
+                                        {pm.homeRank ? <span className="text-emerald-300 font-black">#{pm.homeRank} </span> : null}
                                         {pm.homeName}{' '}
                                         <span className="text-emerald-400 font-black">
                                           {pm.homeScore}-{pm.awayScore}
                                         </span>{' '}
+                                        {pm.awayRank ? <span className="text-sky-300 font-black">#{pm.awayRank} </span> : null}
                                         {pm.awayName}
                                       </p>
                                       <span className="text-[9px] font-bold text-purple-300">
@@ -844,10 +843,14 @@ export default function StatsExplorerView({
                                   {selectedPastMatch.competition} • {selectedPastMatch.date}
                                 </span>
                                 <h4 className="text-xs font-black text-white">
-                                  {selectedPastMatch.homeName} {selectedPastMatch.homeScore} - {selectedPastMatch.awayScore} {selectedPastMatch.awayName}
+                                  {selectedPastMatch.homeRank ? `#${selectedPastMatch.homeRank} ` : ''}
+                                  {selectedPastMatch.homeName} {selectedPastMatch.homeScore} - {selectedPastMatch.awayScore}{' '}
+                                  {selectedPastMatch.awayRank ? `#${selectedPastMatch.awayRank} ` : ''}
+                                  {selectedPastMatch.awayName}
                                 </h4>
                               </div>
                               <button
+                                type="button"
                                 onClick={() => setSelectedPastMatch(null)}
                                 className="p-1 rounded-lg bg-gray-800 text-gray-300 cursor-pointer"
                               >

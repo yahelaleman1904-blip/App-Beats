@@ -10,8 +10,8 @@ import unicodedata
 import httpx
 
 app = FastAPI(
-    title="Draftea Beats AI - Motor Multi-Torneo, Cancha Interactiva & Buscador",
-    version="7.0.0"
+    title="Draftea Beats AI - Motor Global Multi-Competencia & Memoria Evolutiva",
+    version="8.0.0"
 )
 
 app.add_middleware(
@@ -31,33 +31,37 @@ HEADERS = {
 }
 
 LIVE_LEAGUES_MAP = {
-    "LIGA_MX": {"slug": "mex.1", "name": "Liga BBVA MX", "profile": "Equilibrada • Localía Fuerte y Liguilla Táctica"},
-    "LIGA_MX_FEM": {"slug": "mex.w.1", "name": "Liga MX Femenil", "profile": "Alta en Goles (+2.5 frecuente) • Dominio Top 5"},
-    "LALIGA": {"slug": "esp.1", "name": "LaLiga EA Sports", "profile": "Táctica • Bloques bajos y partidos definidos por 1 gol"},
-    "PREMIER": {"slug": "eng.1", "name": "Premier League", "profile": "Ritmo Alto • Transiciones rápidas, +2.5 Goles y Tiros"},
-    "FA_CUP": {"slug": "eng.fa", "name": "Emirates FA Cup", "profile": "Eliminación Directa • Rotaciones y volumen de remates"},
-    "SERIE_A": {"slug": "ita.1", "name": "Serie A Enilive", "profile": "Táctica / Estratégica • Ideal para Tiros de Media Distancia"},
-    "BUNDESLIGA": {"slug": "ger.1", "name": "Bundesliga", "profile": "Ofensiva Abierta • Alta tendencia a +2.5 Goles y Ambos Anotan"},
-    "LIGUE_1": {"slug": "fra.1", "name": "Ligue 1 McDonald's", "profile": "Física • Duelos cerrados salvo partidos del PSG/Mónaco"},
-    "UCL": {"slug": "uefa.champions", "name": "UEFA Champions League", "profile": "Élite • Alta exigencia, titulares fijos y volumen de tiros"},
-    "UEL": {"slug": "uefa.europa", "name": "UEFA Europa League", "profile": "Competitiva • Rotaciones moderadas y goles en 2da mitad"},
-    "EREDIVISIE": {"slug": "ned.1", "name": "Eredivisie", "profile": "Ultra Ofensiva • Liga Top para +1.5/+2.5 Goles y Tiros al Arco"},
-    "JUPILER_PRO": {"slug": "bel.1", "name": "Jupiler Pro League", "profile": "Abierta • Excelente para Ambos Anotan y +1.5 Goles"},
-    "PRIMEIRA_LIGA": {"slug": "por.1", "name": "Liga Portugal", "profile": "Asimétrica • Dominio de Sporting/Porto/Benfica en Tiros y Córners"},
-    "LIBERTADORES": {"slug": "conmebol.libertadores", "name": "CONMEBOL Libertadores", "profile": "Intensa / Cerrada • Localía pesada, muchas tarjetas y pocos goles"},
-    "SUDAMERICANA": {"slug": "conmebol.sudamericana", "profile": "Fricción Alta • Partidos definidos por 1 gol y balón parado", "name": "CONMEBOL Sudamericana"},
-    "ARGENTINA": {"slug": "arg.1", "name": "Liga Profesional", "profile": "Defensiva / Fricción • Tendencia a 1-0, tarjetas y córners"},
-    "BRASILEIRAO": {"slug": "bra.1", "name": "Brasileirão Betano", "profile": "Alto Volumen de Tiros • Extremos encaradores y atajadas"},
-    "COLOMBIA": {"slug": "col.1", "name": "Liga BetPlay", "profile": "Cerrada • Equipos que anotan 1 gol y cuidan resultado"},
-    "A_LEAGUE": {"slug": "aus.1", "name": "Isuzu A-League", "profile": "Goleadora • Defensas abiertas, ideal para +1.5 y +2.5 Goles"},
+    "LIGA_MX": {"slug": "mex.1", "name": "Liga BBVA MX", "profile": "Equilibrada • Localía Fuerte"},
+    "LIGA_MX_FEM": {"slug": "mex.w.1", "name": "Liga MX Femenil", "profile": "Alta en Goles (+2.5 frecuente)"},
+    "LALIGA": {"slug": "esp.1", "name": "LaLiga EA Sports", "profile": "Táctica • Bloques bajos"},
+    "COPA_DEL_REY": {"slug": "esp.copa_del_rey", "name": "Copa del Rey", "profile": "Eliminación Directa • España"},
+    "SUPERCOPA_ESP": {"slug": "esp.super_cup", "name": "Supercopa de España", "profile": "Torneo Élite • España"},
+    "PREMIER": {"slug": "eng.1", "name": "Premier League", "profile": "Ritmo Alto • Transiciones rápidas"},
+    "FA_CUP": {"slug": "eng.fa", "name": "Emirates FA Cup", "profile": "Eliminación Directa • Inglaterra"},
+    "SERIE_A": {"slug": "ita.1", "name": "Serie A Enilive", "profile": "Táctica / Estratégica"},
+    "BUNDESLIGA": {"slug": "ger.1", "name": "Bundesliga", "profile": "Ofensiva Abierta"},
+    "DFB_POKAL": {"slug": "ger.dfb_pokal", "name": "DFB Pokal", "profile": "Copa Alemana • Eliminación Directa"},
+    "LIGUE_1": {"slug": "fra.1", "name": "Ligue 1 McDonald's", "profile": "Física • Transiciones"},
+    "SAUDI_PRO": {"slug": "ksa.1", "name": "Saudi Pro League", "profile": "Liga Árabe • Ofensiva y Volumen de Tiros"},
+    "UCL": {"slug": "uefa.champions", "name": "UEFA Champions League", "profile": "Élite Europea"},
+    "UWCL": {"slug": "uefa.wchampions", "name": "UEFA Champions Femenil", "profile": "Élite Femenil • Alta en Goles"},
+    "UEL": {"slug": "uefa.europa", "name": "UEFA Europa League", "profile": "Competitiva Europea"},
+    "UECL": {"slug": "uefa.europa.conf", "name": "UEFA Conference League", "profile": "Competencia Europea Abierta"},
+    "EREDIVISIE": {"slug": "ned.1", "name": "Eredivisie", "profile": "Ultra Ofensiva"},
+    "JUPILER_PRO": {"slug": "bel.1", "name": "Jupiler Pro League", "profile": "Abierta"},
+    "PRIMEIRA_LIGA": {"slug": "por.1", "name": "Liga Portugal", "profile": "Dominio Top 3"},
+    "LIBERTADORES": {"slug": "conmebol.libertadores", "name": "CONMEBOL Libertadores", "profile": "Intensa • Localía Fuerte"},
+    "SUDAMERICANA": {"slug": "conmebol.sudamericana", "name": "CONMEBOL Sudamericana", "profile": "Fricción Alta"},
+    "ARGENTINA": {"slug": "arg.1", "name": "Liga Profesional", "profile": "Defensiva / Fricción"},
+    "BRASILEIRAO": {"slug": "bra.1", "name": "Brasileirão Betano", "profile": "Alto Volumen de Tiros"},
+    "COLOMBIA": {"slug": "col.1", "name": "Liga BetPlay", "profile": "Cerrada"},
+    "A_LEAGUE": {"slug": "aus.1", "name": "Isuzu A-League", "profile": "Goleadora"},
 }
 
 SLUG_TO_LEAGUE_NAME = {v["slug"]: v["name"] for v in LIVE_LEAGUES_MAP.values()}
 SLUG_TO_LEAGUE_NAME.update({
-    "esp.copa_del_rey": "Copa del Rey",
     "eng.league_cup": "EFL Carabao Cup",
     "ita.coppa_italia": "Coppa Italia",
-    "ger.dfb_pokal": "DFB Pokal",
     "fra.coupe_de_france": "Coupe de France",
     "uefa.euro": "UEFA Euro",
     "concacaf.champions": "CONCACAF Champions Cup",
@@ -65,7 +69,8 @@ SLUG_TO_LEAGUE_NAME.update({
 
 DEEP_CACHE = {}
 CARTELERA_CACHE = {"timestamp": None, "date_key": None, "matches": []}
-TEAMS_DIRECTORY = {}  # Directorio dinámico de clubes para el buscador estilo Google
+TEAMS_DIRECTORY = {}
+STANDINGS_CACHE = {}
 
 
 def normalize_text(text: str) -> str:
@@ -76,7 +81,6 @@ def normalize_text(text: str) -> str:
 
 
 def register_team_in_directory(team_obj, league_slug: str, league_name: str):
-    """Registra automáticamente cada club visto en el directorio global para el Buscador."""
     t_id = str(team_obj.get("id", ""))
     t_name = team_obj.get("displayName") or team_obj.get("name") or ""
     if not t_id or not t_name:
@@ -90,6 +94,58 @@ def register_team_in_directory(team_obj, league_slug: str, league_name: str):
         "leagueName": league_name,
         "searchKey": normalize_text(f"{t_name} {team_obj.get('abbreviation', '')}")
     }
+
+
+def extract_rank_from_competitor(comp_obj, team_id_str: str = "", team_name_str: str = ""):
+    c_rank = comp_obj.get("curatedRank", {}).get("current") or comp_obj.get("rank")
+    if c_rank and str(c_rank).isdigit() and 1 <= int(c_rank) <= 40:
+        rank_int = int(c_rank)
+        if team_id_str:
+            STANDINGS_CACHE[str(team_id_str)] = rank_int
+        if team_name_str:
+            STANDINGS_CACHE[normalize_text(team_name_str)] = rank_int
+        return rank_int
+
+    if team_id_str and str(team_id_str) in STANDINGS_CACHE:
+        return STANDINGS_CACHE[str(team_id_str)]
+    norm_n = normalize_text(team_name_str)
+    if norm_n and norm_n in STANDINGS_CACHE:
+        return STANDINGS_CACHE[norm_n]
+    return None
+
+
+async def ensure_league_standings_cached(client: httpx.AsyncClient, league_slug: str):
+    cache_flag = f"loaded_{league_slug}"
+    if cache_flag in STANDINGS_CACHE:
+        return
+    STANDINGS_CACHE[cache_flag] = True
+
+    url = f"https://site.api.espn.com/apis/v2/sports/soccer/{league_slug}/standings"
+    try:
+        resp = await client.get(url, headers=HEADERS)
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        children = data.get("children", [])
+        entries = list(data.get("standings", {}).get("entries", []))
+        for ch in children:
+            entries.extend(ch.get("standings", {}).get("entries", []))
+
+        for idx, ent in enumerate(entries):
+            t_obj = ent.get("team", {})
+            t_id = str(t_obj.get("id", ""))
+            t_name = t_obj.get("displayName") or t_obj.get("name") or ""
+            rank_val = idx + 1
+            for st in ent.get("stats", []):
+                if st.get("name") == "rank" and st.get("value"):
+                    rank_val = int(float(st.get("value")))
+                    break
+            if t_id:
+                STANDINGS_CACHE[t_id] = rank_val
+            if t_name:
+                STANDINGS_CACHE[normalize_text(t_name)] = rank_val
+    except Exception:
+        pass
 
 
 def parse_kickoff_utc(iso_date_str: str):
@@ -123,6 +179,18 @@ def safe_float(val, default=0.0):
         return float(str(val).replace("%", "").strip())
     except Exception:
         return default
+
+
+def american_to_decimal_odd(am_val, fallback=1.35):
+    try:
+        v = float(str(am_val).replace("+", "").strip())
+        if v == 0:
+            return fallback
+        if v > 0:
+            return round(1.0 + (v / 100.0), 2)
+        return round(1.0 + (100.0 / abs(v)), 2)
+    except Exception:
+        return fallback
 
 
 def extract_official_team_stats_from_boxscore(box_team_obj):
@@ -189,7 +257,6 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
 
 
 def extract_player_stats_from_entry(p_entry):
-    """Extrae todas las métricas reales disponibles en ESPN para el jugador en ese partido."""
     st_map = {}
     for s in p_entry.get("stats", []):
         s_name = s.get("name", "")
@@ -213,7 +280,6 @@ def extract_player_stats_from_entry(p_entry):
     offsides = int(st_map.get("offsides", 0))
     appearances = int(st_map.get("appearances", 1))
 
-    # Estimación real de xG del partido basada en tiros al arco, tiros totales y goles
     xg_est = round((sot * 0.28) + (max(0, shots - sot) * 0.07) + (goals * 0.15), 2)
 
     return {
@@ -245,18 +311,12 @@ def map_pos_Name_es(pos_abbr: str) -> str:
 
 
 def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substitutions_list):
-    """
-    Construye:
-    1. Las filas de la cancha interactiva (con los datos completos de cada jugador y por quién salió de cambio).
-    2. La lista completa de convocados (Titulares, Suplentes que entraron y Banca) para la Tabla estilo Imagen 1.
-    """
     starters = [p for p in roster_list if p.get("starter")]
     if not starters:
         starters = roster_list[:11]
 
-    # Mapa rápido de quién salió por quién y quién entró por quién
-    sub_out_map = {}  # nombre_normalizado_saliente -> {"in": nombre_entrante, "min": clock}
-    sub_in_map = {}   # nombre_normalizado_entrante -> {"out": nombre_saliente, "min": clock}
+    sub_out_map = {}
+    sub_in_map = {}
     for sub in substitutions_list:
         out_norm = normalize_text(sub.get("out", ""))
         in_norm = normalize_text(sub.get("in", ""))
@@ -279,11 +339,9 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
         subbed_out = bool(p.get("subbedOut", False))
         subbed_in = bool(p.get("subbedIn", False))
 
-        # Buscar cruce exacto de cambio
         sub_out_info = sub_out_map.get(norm_full) or sub_out_map.get(norm_short)
         sub_in_info = sub_in_map.get(norm_full) or sub_in_map.get(norm_short)
         if not sub_out_info and subbed_out:
-            # Buscar por apellido
             last_n = norm_full.split()[-1] if norm_full else ""
             for k, v in sub_out_map.items():
                 if len(last_n) >= 4 and last_n in k:
@@ -357,7 +415,6 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
 
     rows = [r for r in [gk, df, mf, fw] if r]
 
-    # Ordenar convocados por Rating de mayor a menor (como en la Imagen 1)
     squad_sorted = sorted(
         enriched_all,
         key=lambda x: (1 if (x["starter"] or x["subbedIn"]) else 0, x["rating"], x["shots"]),
@@ -374,11 +431,10 @@ async def parse_past_match_summary(
     target_team_id: str,
     fallback_comp_name: str = ""
 ):
-    cache_key = f"summary_v8_{event_id}_{target_team_id}"
+    cache_key = f"summary_v9_{event_id}_{target_team_id}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
 
-    # Intentar primero con el league_slug indicado y si falla con 'all'
     urls_to_try = [
         f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}",
         f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={event_id}"
@@ -419,13 +475,36 @@ async def parse_past_match_summary(
         home_score = safe_int(home_c.get("score", 0))
         away_score = safe_int(away_c.get("score", 0))
 
+        home_rank = extract_rank_from_competitor(home_c, home_id_str, home_name)
+        away_rank = extract_rank_from_competitor(away_c, away_id_str, away_name)
+        for st_group in data.get("standings", {}).get("groups", []):
+            for ent in st_group.get("standings", {}).get("entries", []):
+                tid = str(ent.get("team", {}).get("id", ""))
+                tname = ent.get("team", {}).get("displayName", "")
+                rk = next(
+                    (
+                        int(float(s.get("value")))
+                        for s in ent.get("stats", [])
+                        if s.get("name") == "rank" and s.get("value")
+                    ),
+                    None
+                )
+                if rk:
+                    if tid:
+                        STANDINGS_CACHE[tid] = rk
+                    if tname:
+                        STANDINGS_CACHE[normalize_text(tname)] = rk
+                    if tid == home_id_str and not home_rank:
+                        home_rank = rk
+                    if tid == away_id_str and not away_rank:
+                        away_rank = rk
+
         comp_name = (
             data.get("header", {}).get("league", {}).get("name")
             or fallback_comp_name
             or SLUG_TO_LEAGUE_NAME.get(league_slug, "Torneo Oficial")
         )
 
-        # Registrar ambos clubes en el directorio del buscador
         register_team_in_directory({"id": home_id_str, "displayName": home_name, "abbreviation": home_abbr, "logo": home_logo}, league_slug, comp_name)
         register_team_in_directory({"id": away_id_str, "displayName": away_name, "abbreviation": away_abbr, "logo": away_logo}, league_slug, comp_name)
 
@@ -465,7 +544,6 @@ async def parse_past_match_summary(
                 if ath.get("shortName"):
                     player_to_team_label[ath.get("shortName")] = t_label
 
-        # Extraer goles, tarjetas y sustituciones primero para inyectarlos en los nodos de la cancha
         scorers, cards, substitutions = [], [], []
         for ev in data.get("keyEvents", []):
             ev_type = ev.get("type", {}).get("text", "").lower()
@@ -516,7 +594,6 @@ async def parse_past_match_summary(
         h_official = extract_official_team_stats_from_boxscore(home_box_obj)
         a_official = extract_official_team_stats_from_boxscore(away_box_obj)
 
-        # Construir filas interactivas de cancha y tablas de convocados (Imagen 1)
         home_rows, home_squad_table = build_pitch_and_squad_from_roster(
             home_roster_obj.get("roster", []), home_abbr, home_logo, substitutions
         )
@@ -575,12 +652,12 @@ async def parse_past_match_summary(
                     })
 
         shots_pair = [
-            h_official["shots"] if h_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == home_id_str),
-            a_official["shots"] if a_official["shots"] > 0 else sum(p["shots"] for p in player_perf if p["teamId"] == away_id_str),
+            max(h_official["shots"], sum(p["shots"] for p in player_perf if p["teamId"] == home_id_str), home_score),
+            max(a_official["shots"], sum(p["shots"] for p in player_perf if p["teamId"] == away_id_str), away_score),
         ]
         sot_pair = [
-            h_official["sot"] if h_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == home_id_str),
-            a_official["sot"] if a_official["sot"] > 0 else sum(p["sot"] for p in player_perf if p["teamId"] == away_id_str),
+            max(h_official["sot"], sum(p["sot"] for p in player_perf if p["teamId"] == home_id_str), home_score),
+            max(a_official["sot"], sum(p["sot"] for p in player_perf if p["teamId"] == away_id_str), away_score),
         ]
         saves_pair = [
             h_official["saves"] if h_official["saves"] > 0 else sum(g["saves"] for g in gk_perf if g["teamId"] == home_id_str),
@@ -596,7 +673,6 @@ async def parse_past_match_summary(
         my_squad_table = home_squad_table if is_home_target else away_squad_table
         opp_squad_table = away_squad_table if is_home_target else home_squad_table
 
-        # Detectar quién metió el PRIMER GOL del partido revisando el primer evento de gol
         first_goal_team = scorers[0]["team"] if len(scorers) > 0 else None
         my_abbr_clean = home_abbr if is_home_target else away_abbr
         my_name_clean = home_name if is_home_target else away_name
@@ -622,6 +698,8 @@ async def parse_past_match_summary(
             "awayLogo": away_logo,
             "homeScore": home_score,
             "awayScore": away_score,
+            "homeRank": home_rank or STANDINGS_CACHE.get(home_id_str),
+            "awayRank": away_rank or STANDINGS_CACHE.get(away_id_str),
             "result": result_letter,
             "teamFormation": home_formation if is_home_target else away_formation,
             "oppFormation": away_formation if is_home_target else home_formation,
@@ -660,6 +738,7 @@ async def parse_past_match_summary(
             "_concededFirst": conceded_first,
             "_isHomeGame": 1 if is_home_target else 0,
         }
+
         DEEP_CACHE[cache_key] = parsed_obj
         return parsed_obj
     except Exception:
@@ -668,17 +747,31 @@ async def parse_past_match_summary(
 
 async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id: str):
     """
-    MEJORA 1: Descarga los últimos 5 partidos jugados del club a través de TODAS LAS COMPETICIONES
-    (Liga + Champions + Europa League + Copa Nacional + Libertadores) y muestra de qué competencia fue cada uno.
+    Descarga los últimos 5 partidos globales del club sumando todas sus competiciones
+    (Liga, Champions, Copa del Rey, Supercopa, Pokal, Europa/Conference League, Libertadores).
     """
     if not team_id:
         return []
 
-    # Consultamos el calendario global ('all') + la liga base + torneos continentales para no perder ningún juego de Champions/Copa
     candidate_slugs = ["all", league_slug]
-    if league_slug in ["esp.1", "eng.1", "ita.1", "ger.1", "fra.1", "ned.1", "por.1", "bel.1"]:
-        candidate_slugs.extend(["uefa.champions", "uefa.europa"])
-    elif league_slug in ["arg.1", "bra.1", "col.1"]:
+    if league_slug in [
+        "esp.1", "esp.copa_del_rey", "esp.super_cup",
+        "eng.1", "eng.fa",
+        "ita.1",
+        "ger.1", "ger.dfb_pokal",
+        "fra.1", "ned.1", "por.1", "bel.1",
+        "uefa.champions", "uefa.europa", "uefa.europa.conf"
+    ]:
+        candidate_slugs.extend([
+            "esp.1", "esp.copa_del_rey", "esp.super_cup",
+            "ger.1", "ger.dfb_pokal",
+            "eng.1", "eng.fa",
+            "ita.1", "fra.1",
+            "uefa.champions", "uefa.europa", "uefa.europa.conf"
+        ])
+    elif league_slug in ["mex.w.1", "uefa.wchampions"]:
+        candidate_slugs.extend(["mex.w.1", "uefa.wchampions"])
+    elif league_slug in ["arg.1", "bra.1", "col.1", "conmebol.libertadores", "conmebol.sudamericana"]:
         candidate_slugs.extend(["conmebol.libertadores", "conmebol.sudamericana"])
 
     seen_slugs = []
@@ -768,24 +861,24 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
     is_scoring_machine = avg_gf >= 2.0 or blowout_games >= 2
 
     if park_the_bus:
-        style_tag = "🛡️ Cerrojo Táctico (Mete 1 gol y cierra espacios)"
+        style_tag = "Cerrojo Táctico (Mete 1 gol y cierra espacios)"
         explanation = (
-            f"En {low_scoring_games} de sus últimos {n} juegos hubo ≤2 goles "
-            f"(promedia {avg_gf} goles a favor y {avg_ga} en contra). Suele marcar 1 gol y replegarse."
+            f"En {low_scoring_games} de sus últimos {n} juegos hubo <=2 goles "
+            f"(promedia {avg_gf} goles a favor y {avg_ga} en contra)."
         )
     elif is_scoring_machine:
-        style_tag = "🔥 Aplanadora Ofensiva (Volumen alto y goleadas)"
+        style_tag = "Aplanadora Ofensiva (Volumen alto y goleadas)"
         explanation = (
             f"Promedia {avg_gf} goles y {avg_sot} tiros al arco por partido "
             f"({blowout_games} partidos con 3+ goles en sus últimos {n})."
         )
     elif avg_shots >= 14.0:
-        style_tag = "⚡ Ataque Constante por Bandas (Alto volumen de tiros)"
+        style_tag = "Ataque Constante por Bandas (Alto volumen de tiros)"
         explanation = (
             f"Genera {avg_shots} tiros totales y {avg_sot} al arco por partido ({avg_poss}% posesión)."
         )
     else:
-        style_tag = "⚖️ Transición y Orden Medio"
+        style_tag = "Transición y Orden Medio"
         explanation = (
             f"Promedia {avg_gf} goles a favor, {avg_ga} en contra y {avg_sot} tiros al arco en sus últimos {n} juegos."
         )
@@ -808,17 +901,12 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
 @app.get("/")
 @app.get("/api/health")
 async def health_check():
-    return {"ok": True, "status": "online", "version": "7.0.0"}
+    return {"ok": True, "status": "online", "version": "8.0.0"}
 
 
 @app.get("/api/teams/search")
 async def search_clubs_autocomplete(q: str = ""):
-    """
-    MEJORA 2: Buscador Inteligente de Clubes estilo Google.
-    Si escribes 'Bar', devuelve 'FC Barcelona', 'Barracas Central', etc.
-    """
     query_norm = normalize_text(q)
-    # Si el directorio aún está vacío, poblarlo rápido desde el caché de cartelera
     if not TEAMS_DIRECTORY and CARTELERA_CACHE["matches"]:
         for m in CARTELERA_CACHE["matches"]:
             register_team_in_directory(
@@ -836,7 +924,6 @@ async def search_clubs_autocomplete(q: str = ""):
     if not query_norm:
         return {"ok": True, "teams": all_clubs[:15]}
 
-    # Priorizar los que empiezan con el texto buscado y luego los que lo contienen
     starts_with = [c for c in all_clubs if normalize_text(c["name"]).startswith(query_norm) or normalize_text(c["short"]).startswith(query_norm)]
     contains = [c for c in all_clubs if c not in starts_with and query_norm in c["searchKey"]]
 
@@ -846,13 +933,8 @@ async def search_clubs_autocomplete(q: str = ""):
 
 @app.get("/api/team-profile")
 async def get_club_full_profile(team_id: str, league_slug: str = "esp.1", team_name: str = "Club", team_abbr: str = "CLB", team_logo: str = ""):
-    """
-    Devuelve el perfil completo del club seleccionado en el Buscador:
-    - Su último partido jugado (con plantilla en cancha interactiva, estadísticas al lado y tabla de convocados).
-    - Sus últimos 5 partidos jugados en todas las competiciones.
-    - Su análisis táctico y ranking de jugadores en los últimos 5 juegos.
-    """
     async with httpx.AsyncClient(timeout=16.0, follow_redirects=True) as client:
+        await ensure_league_standings_cached(client, league_slug)
         last_5_matches = await fetch_team_last_5(client, league_slug, team_id)
 
     tactics = analyze_team_tactical_style(last_5_matches, team_name, is_home=True)
@@ -865,26 +947,13 @@ async def get_club_full_profile(team_id: str, league_slug: str = "esp.1", team_n
             "name": team_name,
             "short": team_abbr,
             "logo": team_logo,
+            "rank": STANDINGS_CACHE.get(str(team_id)) or STANDINGS_CACHE.get(normalize_text(team_name)),
             "leagueSlug": league_slug
         },
         "tactics": tactics,
         "latestMatch": latest_match,
         "last5Matches": last_5_matches
     }
-
-
-# En draftea-backend/main.py, reemplaza toda la función @app.get("/api/match-deep-stats") por esta:
-
-def american_to_decimal_odd(am_val, fallback=1.35):
-    try:
-        v = float(str(am_val).replace("+", "").strip())
-        if v == 0:
-            return fallback
-        if v > 0:
-            return round(1.0 + (v / 100.0), 2)
-        return round(1.0 + (100.0 / abs(v)), 2)
-    except Exception:
-        return fallback
 
 
 @app.get("/api/match-deep-stats")
@@ -897,6 +966,7 @@ async def get_match_deep_stats(
     event_id: str = ""
 ):
     async with httpx.AsyncClient(timeout=16.0, follow_redirects=True) as client:
+        await ensure_league_standings_cached(client, league_slug)
         home_last5, away_last5 = await asyncio.gather(
             fetch_team_last_5(client, league_slug, home_id),
             fetch_team_last_5(client, league_slug, away_id)
@@ -918,6 +988,7 @@ async def get_match_deep_stats(
             "overOdd": None,
             "underOdd": None
         }
+        injured_names_norm = set()
 
         if event_id:
             try:
@@ -926,7 +997,13 @@ async def get_match_deep_stats(
                 if ev_resp.status_code == 200:
                     ev_data = ev_resp.json()
 
-                    # 1. Extraer momios oficiales de las casas de apuestas (pickcenter / odds)
+                    # Extraer lesionados o ausentes reportados oficialmente en el evento
+                    for inj_group in ev_data.get("injuries", []):
+                        for inj_item in inj_group.get("injuries", []):
+                            ath_name = inj_item.get("athlete", {}).get("displayName", "")
+                            if ath_name:
+                                injured_names_norm.add(normalize_text(ath_name))
+
                     pickcenter = ev_data.get("pickcenter", []) or ev_data.get("odds", [])
                     if pickcenter and len(pickcenter) > 0:
                         pc = pickcenter[0]
@@ -948,7 +1025,6 @@ async def get_match_deep_stats(
                         if d_ml is not None:
                             bookmaker_odds["drawOdd"] = american_to_decimal_odd(d_ml, 4.20)
 
-                    # 2. Verificar si ya hay alineación confirmada
                     rosters = ev_data.get("rosters", [])
                     if len(rosters) >= 2 and rosters[0].get("roster") and rosters[1].get("roster"):
                         h_rows, h_sq = build_pitch_and_squad_from_roster(rosters[0].get("roster", []), home_abbr, "", [])
@@ -993,7 +1069,6 @@ async def get_match_deep_stats(
     home_cards_avg = round(sum(m.get("_myCards", 0) for m in home_last5) / h_count, 1)
     away_cards_avg = round(sum(m.get("_myCards", 0) for m in away_last5) / a_count, 1)
 
-    # Cálculo de 1er Gol y Porcentaje de Victoria
     home_scored_first_rate = round(sum(m.get("_scoredFirst", 0) for m in home_last5) / h_count * 100)
     away_scored_first_rate = round(sum(m.get("_scoredFirst", 0) for m in away_last5) / a_count * 100)
     home_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in home_last5) / h_count * 100)
@@ -1032,13 +1107,8 @@ async def get_match_deep_stats(
     win_prob_away = round((away_strength / total_str) * 100)
     win_prob_draw = max(10, 100 - win_prob_home - win_prob_away)
 
-    # =========================================================================
-    # MOTOR DE REGLAS EXACTAS DE APERTURA Y CANDADOS DE DRAFTEA (DAF 12 y DAF 13)
-    # =========================================================================
     expected_total_goals = round(home_goals_avg + away_goals_avg, 2)
 
-    # 1. Goles Totales: Si ambos equipos promedian >= 2.7 goles combinados o Over 2.5 >= 65%
-    # (ej. Barcelona vs Real Madrid), Draftea BLOQUEA ↑ 1.5 con candado y solo abre desde ↑ 2.5
     is_over15_locked_in_draftea = (
         expected_total_goals >= 2.75
         or over25 >= 65
@@ -1047,7 +1117,6 @@ async def get_match_deep_stats(
     draftea_min_goal_line = 2.5 if is_over15_locked_in_draftea else 1.5
     draftea_under_safe_line = 3.5 if expected_total_goals <= 3.0 else 4.5
 
-    # 2. Total de Goles por Equipo (como en DAF 12: Total de goles Barcelona 1.5 / 2.5 y Real Madrid 0.5 / 1.5)
     draftea_home_team_goal_line = 1.5 if home_goals_avg >= 1.65 else 0.5
     draftea_away_team_goal_line = 1.5 if away_goals_avg >= 1.65 else 0.5
     home_team_over_hits = sum(
@@ -1057,17 +1126,13 @@ async def get_match_deep_stats(
         1 for m in away_last5 if m["_myGoals"] > draftea_away_team_goal_line
     )
 
-    # 3. Total de Tiros al Arco de Equipo (En DAF 12: Barcelona empieza en 7.0+ (1.42x) y Real Madrid en 5.0+ (1.69x))
-    # En Draftea NUNCA hay tope en 5: la primera línea desbloqueada es round(promedio_sot_L5 - 0.3)
-    draftea_home_sot_open_line = max(3, int(round(home_sot_avg - 0.25)))
-    draftea_away_sot_open_line = max(3, int(round(away_sot_avg - 0.25)))
-    draftea_home_shots_open_line = max(9, int(round(home_shots_avg - 1.2)))
-    draftea_away_shots_open_line = max(8, int(round(away_shots_avg - 1.2)))
+    draftea_home_sot_open_line = max(2, int(round(home_sot_avg - 0.25)))
+    draftea_away_sot_open_line = max(2, int(round(away_sot_avg - 0.25)))
+    draftea_home_shots_open_line = max(8, int(round(home_shots_avg - 1.2)))
+    draftea_away_shots_open_line = max(7, int(round(away_shots_avg - 1.2)))
 
-    # Momios reales estilo Draftea
     ml_home_odd = bookmaker_odds["homeWinOdd"] or round(max(1.32, min(4.50, 100 / max(22, win_prob_home) * 0.92)), 2)
     ml_away_odd = bookmaker_odds["awayWinOdd"] or round(max(1.45, min(5.50, 100 / max(18, win_prob_away) * 0.92)), 2)
-    # Pago Anticipado por 1 gol PA(1) (En DAF12: FCB Money Line = 1.60x -> PA(1) = 1.25x; RMA = 3.99x -> PA(1) = 1.89x)
     pa1_home_odd = round(max(1.18, 1.0 + (ml_home_odd - 1.0) * 0.42), 2)
     pa1_away_odd = round(max(1.25, 1.0 + (ml_away_odd - 1.0) * 0.30), 2)
     dc_home_draw_odd = round(max(1.18, 1.0 + (ml_home_odd - 1.0) * 0.38), 2)
@@ -1146,17 +1211,28 @@ async def get_match_deep_stats(
     process_team_history(home_last5, home_id, home_abbr, True)
     process_team_history(away_last5, away_id, away_abbr, False)
 
+    # Detectar jugadores lesionados o ausentes en el partido más reciente de su equipo
+    latest_home_match_date = home_last5[0]["date"] if home_last5 else None
+    latest_away_match_date = away_last5[0]["date"] if away_last5 else None
+
+    for sh in agg_players.values():
+        norm_p_name = normalize_text(sh["name"])
+        latest_club_date = latest_home_match_date if sh["isHome"] else latest_away_match_date
+        played_latest = any(log["date"] == latest_club_date for log in sh["matchLogs"]) if latest_club_date else True
+        is_officially_injured = norm_p_name in injured_names_norm
+        sh["isInjuredOrOut"] = is_officially_injured or (not played_latest and sh["games"] <= 3) or (sh["games"] <= 1)
+
     home_tactics = analyze_team_tactical_style(home_last5, home_abbr, is_home=True)
     away_tactics = analyze_team_tactical_style(away_last5, away_abbr, is_home=False)
 
     match_script = (
         f"Líneas Oficiales Draftea: Goles Totales desde ↑ {draftea_min_goal_line} • "
-        f"Tiros al Arco {home_abbr} desde {draftea_home_sot_open_line}.0+ vs {away_abbr} desde {draftea_away_sot_open_line}.0+."
+        f"Tiros al Arco {home_abbr} +{draftea_home_sot_open_line}.0 vs {away_abbr} +{draftea_away_sot_open_line}.0."
     )
 
     sorted_shooters = sorted(
         agg_players.values(),
-        key=lambda x: (x["sot"], x["shots"], x["goals"]),
+        key=lambda x: (0 if x.get("isInjuredOrOut") else 1, x["sot"], x["shots"], x["goals"]),
         reverse=True
     )[:14]
 
@@ -1166,14 +1242,10 @@ async def get_match_deep_stats(
         avg_sh = round(sh["shots"] / gms, 1)
         avg_sot = round(sh["sot"] / gms, 1)
         is_rot = sh["subIns"] >= 2 or sh["starts"] < (gms / 2)
+        is_injured = bool(sh.get("isInjuredOrOut", False))
 
-        # =====================================================================
-        # REGLA EXACTA DE DRAFTEA PARA JUGADORES (COMO A. GORDON EN DAF 13.jpeg)
-        # =====================================================================
-        # En DAF 13: Gordon tiene Prom. últimos 5 partidos = 3.6 tiros.
-        # Draftea bloquea 1.0+ (1.01x) y 2.0+ (1.10x) y abre la línea en 3.0+ (1.36x).
         if avg_sh >= 3.1:
-            open_shots_line = max(3, int(avg_sh))  # Ej: 3.6 -> 3.0+ Tiros
+            open_shots_line = max(3, int(avg_sh))
             open_shots_odd = 1.36 if open_shots_line == 3 else 1.45
         elif avg_sh >= 1.9:
             open_shots_line = 2
@@ -1182,8 +1254,6 @@ async def get_match_deep_stats(
             open_shots_line = 1
             open_shots_odd = 1.28
 
-        # En Tiros al Arco B+: Si el jugador promedia >= 1.85 tiros al arco (ej. Mbappé / Haaland),
-        # Draftea suele poner 1.0+ muy bajo (~1.14x) o abrir valor en 2.0+ (~1.42x)
         if avg_sot >= 1.95:
             open_sot_line = 2
             open_sot_odd = 1.44
@@ -1208,7 +1278,9 @@ async def get_match_deep_stats(
             "pos": sh["pos"],
             "posLabel": sh["posLabel"],
             "rating": rating_l5,
-            "bancaPlus": True,
+            "bancaPlus": False,
+            "isInjuredOrOut": is_injured,
+            "availabilityLabel": "BAJA / AUSENTE" if is_injured else ("ROTACIÓN" if is_rot else "TITULAR"),
             "totalShotsL5": sh["shots"],
             "totalSoTL5": sh["sot"],
             "goalsL5": sh["goals"],
@@ -1231,7 +1303,7 @@ async def get_match_deep_stats(
             "startsLast5": sh["starts"],
             "gamesLast5": gms,
             "avgMinutes": 32 if is_rot else 86,
-            "rotationNote": f"Titular {sh['starts']}/{gms} • Línea abierta en Draftea: {open_shots_line}.0+ Tiros ({games_hitting_open_shots}/{gms} verdes)",
+            "rotationNote": f"Titular {sh['starts']}/{gms} • Línea Draftea: {open_shots_line}.0+ Tiros",
             "matchLogs": sh["matchLogs"]
         })
 
@@ -1288,7 +1360,6 @@ async def get_match_deep_stats(
             "noGoalProb": no_goal_prob,
             "homeScoredFirstRate": home_scored_first_rate,
             "awayScoredFirstRate": away_scored_first_rate,
-            # Reglas y Momios exactos de Draftea:
             "isOver15Locked": is_over15_locked_in_draftea,
             "drafteaMinGoalLine": draftea_min_goal_line,
             "drafteaUnderSafeLine": draftea_under_safe_line,
@@ -1322,6 +1393,7 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
 
     async with sem:
         try:
+            await ensure_league_standings_cached(client, league_info["slug"])
             resp = await client.get(url, headers=HEADERS)
             if resp.status_code != 200:
                 return []
@@ -1362,10 +1434,15 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
                 home_team_obj = home.get("team", {})
                 away_team_obj = away.get("team", {})
 
+                home_id_str = str(home_team_obj.get("id", ""))
+                away_id_str = str(away_team_obj.get("id", ""))
                 home_name = home_team_obj.get("displayName", "Local")
                 away_name = away_team_obj.get("displayName", "Visitante")
                 home_abbr = home_team_obj.get("abbreviation", "LOC")
                 away_abbr = away_team_obj.get("abbreviation", "VIS")
+
+                home_rank = extract_rank_from_competitor(home, home_id_str, home_name)
+                away_rank = extract_rank_from_competitor(away, away_id_str, away_name)
 
                 real_leaders = []
                 for c_obj in [home, away]:
@@ -1396,22 +1473,24 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
                     "status": "Por Jugar",
                     "homeTeam": {
                         "id": home_abbr,
-                        "teamApiId": str(home_team_obj.get("id", "")),
+                        "teamApiId": home_id_str,
                         "name": home_name,
                         "short": home_abbr,
                         "logo": home_team_obj.get("logo", ""),
+                        "rank": home_rank,
                         "formation": "4-2-3-1"
                     },
                     "awayTeam": {
                         "id": away_abbr,
-                        "teamApiId": str(away_team_obj.get("id", "")),
+                        "teamApiId": away_id_str,
                         "name": away_name,
                         "short": away_abbr,
                         "logo": away_team_obj.get("logo", ""),
+                        "rank": away_rank,
                         "formation": "4-3-3"
                     },
                     "aiTopSignal": (
-                        f"{primary_star} 1.0+ Tiro al Arco B+"
+                        f"{primary_star} 1.0+ Tiros al Arco"
                         if primary_star
                         else f"{home_name} vs {away_name}: Goles ↑ 1.5"
                     ),
@@ -1419,6 +1498,7 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
                         "over05Goals": 94,
                         "over15Goals": 86,
                         "over25Goals": 68,
+                        "under35Goals": 78,
                         "btts": 70,
                         "homeShotsAvg": 14.2,
                         "awayShotsAvg": 11.8,
@@ -1432,7 +1512,8 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
                             "name": rl["name"],
                             "team": rl["team"],
                             "pos": "DC",
-                            "bancaPlus": True,
+                            "bancaPlus": False,
+                            "isInjuredOrOut": False,
                             "avgShots": 3.2,
                             "avgSoT": 1.5,
                             "xG": 0.49,
@@ -1479,7 +1560,6 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
             "matches": valid_cached
         }
 
-    # Incluimos ayer (-1) solo para registrar clubes en el buscador, pero filtramos partidos vigentes >= hoy
     target_dates = [
         (now_mx + timedelta(days=i)).strftime("%Y%m%d")
         for i in range(-1, days_ahead + 1)
@@ -1513,8 +1593,6 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
         "matches": all_matches
     }
 
-
-# En draftea-backend/main.py, reemplaza toda la función @app.post("/api/verify-tickets") por esta:
 
 @app.post("/api/verify-tickets")
 async def auto_verify_tickets(payload: dict):
@@ -1596,12 +1674,11 @@ async def auto_verify_tickets(payload: dict):
                     if not (completed or state == "post"):
                         continue
 
-                    # 1. Extraer rosters y mapear cada jugador a su equipo (Home o Away)
                     rosters = data.get("rosters", [])
                     all_roster_players = []
                     home_roster_shots, away_roster_shots = 0, 0
                     home_roster_sot, away_roster_sot = 0, 0
-                    player_to_side = {}  # nombre_normalizado -> 'HOME' | 'AWAY'
+                    player_to_side = {}
 
                     for r_idx, r_obj in enumerate(rosters[:2]):
                         r_tid = str(r_obj.get("team", {}).get("id", ""))

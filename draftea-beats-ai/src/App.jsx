@@ -73,32 +73,47 @@ export default function App() {
     fetchLiveCartelera();
   }, []);
 
-  const handleEnsureDeepStats = useCallback(async (match) => {
-    if (!match || !match.homeTeam?.teamApiId || !match.awayTeam?.teamApiId) return;
-    setLoadingDeepId(match.id);
-    try {
-      const url = `${API_BASE_URL}/api/match-deep-stats?league_slug=${encodeURIComponent(
-        match.leagueSlug || 'mex.1'
-      )}&home_id=${encodeURIComponent(match.homeTeam.teamApiId)}&away_id=${encodeURIComponent(
-        match.awayTeam.teamApiId
-      )}&home_abbr=${encodeURIComponent(match.homeTeam.short)}&away_abbr=${encodeURIComponent(
-        match.awayTeam.short
-      )}&event_id=${encodeURIComponent(match.id)}`;
+// En src/App.jsx, reemplaza handleEnsureDeepStats por esta versión:
+  const handleEnsureDeepStats = useCallback(
+    async (match) => {
+      if (!match) return;
+      const cached = deepDataMap[match.id];
+      const hasValidRecent =
+        cached?.recentMatches?.home?.length > 0 ||
+        cached?.recentMatches?.away?.length > 0;
 
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.ok) {
-        setDeepDataMap((prev) => ({
-          ...prev,
-          [match.id]: data
-        }));
+      if (cached && hasValidRecent) return;
+
+      setLoadingDeepId(match.id);
+      try {
+        const url = `${API_BASE_URL}/api/match-deep-stats?league_slug=${encodeURIComponent(
+          match.leagueSlug || 'esp.1'
+        )}&home_id=${encodeURIComponent(
+          match.homeTeam.teamApiId || ''
+        )}&away_id=${encodeURIComponent(
+          match.awayTeam.teamApiId || ''
+        )}&home_abbr=${encodeURIComponent(
+          match.homeTeam.short || 'LOC'
+        )}&away_abbr=${encodeURIComponent(
+          match.awayTeam.short || 'VIS'
+        )}&event_id=${encodeURIComponent(match.id)}`;
+
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.ok) {
+          setDeepDataMap((prev) => ({
+            ...prev,
+            [match.id]: data
+          }));
+        }
+      } catch (err) {
+        console.error('Error cargando deep stats:', err);
+      } finally {
+        setLoadingDeepId(null);
       }
-    } catch (err) {
-      console.error('Error cargando estadísticas profundas:', err);
-    } finally {
-      setLoadingDeepId(null);
-    }
-  }, []);
+    },
+    [deepDataMap]
+  );
 
   useEffect(() => {
     try {

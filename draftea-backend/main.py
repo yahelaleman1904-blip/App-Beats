@@ -350,13 +350,18 @@ def map_pos_Name_es(pos_abbr: str) -> str:
 
 
 def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substitutions_list):
-    starters = [p for p in roster_list if p.get("starter")]
+    if not isinstance(roster_list, list) or len(roster_list) == 0:
+        return [], []
+
+    starters = [p for p in roster_list if isinstance(p, dict) and p.get("starter")]
     if not starters:
-        starters = roster_list[:11]
+        starters = [p for p in roster_list if isinstance(p, dict)][:11]
 
     sub_out_map = {}
     sub_in_map = {}
-    for sub in substitutions_list:
+    for sub in (substitutions_list or []):
+        if not isinstance(sub, dict):
+            continue
         out_norm = normalize_text(sub.get("out", ""))
         in_norm = normalize_text(sub.get("in", ""))
         if out_norm:
@@ -365,10 +370,11 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
             sub_in_map[in_norm] = {"out": sub.get("out"), "min": sub.get("min")}
 
     def enrich_player_object(p):
-        athlete = p.get("athlete", {})
-        pos_abbr = p.get("position", {}).get("abbreviation", "M").upper()
-        jersey = safe_int(p.get("jersey", athlete.get("jersey", 0)), 0)
-        full_name = athlete.get("displayName") or athlete.get("shortName") or "Jugador"
+        athlete = p.get("athlete") if isinstance(p.get("athlete"), dict) else {}
+        pos_obj = p.get("position") if isinstance(p.get("position"), dict) else (athlete.get("position") if isinstance(athlete.get("position"), dict) else {})
+        pos_abbr = str(pos_obj.get("abbreviation") or "M").upper()
+        jersey = safe_int(p.get("jersey") or athlete.get("jersey") or 0, 0)
+        full_name = athlete.get("displayName") or athlete.get("shortName") or p.get("displayName") or "Jugador"
         short_name = athlete.get("shortName") or full_name
         norm_full = normalize_text(full_name)
         norm_short = normalize_text(short_name)
@@ -435,7 +441,7 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
             "redCards": p_st["redCards"],
         }
 
-    enriched_all = [enrich_player_object(p) for p in roster_list]
+    enriched_all = [enrich_player_object(p) for p in roster_list if isinstance(p, dict)]
     enriched_starters = [ep for ep in enriched_all if ep["starter"]][:11]
     if not enriched_starters:
         enriched_starters = enriched_all[:11]
@@ -452,6 +458,13 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
         else:
             mf.append(node)
 
+    # Si todos los jugadores venían con posición genérica 'M', distribuirlos en 1-4-3-3 para que siempre se dibuje la formación
+    if len(gk) == 0 and len(df) == 0 and len(fw) == 0 and len(mf) >= 7:
+        gk = mf[:1]
+        df = mf[1:5]
+        fw = mf[8:11]
+        mf = mf[5:8]
+
     rows = [r for r in [gk, df, mf, fw] if r]
 
     squad_sorted = sorted(
@@ -461,8 +474,6 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
     )
 
     return rows, squad_sorted
-
-
 def build_fallback_past_match(event_id: str, league_slug: str, target_team_id: str, fallback_comp_name: str, raw_ev: dict):
     """
     Constructor de respaldo garantizado: si el summary individual de ESPN falla o cambia de formato,
@@ -574,50 +585,68 @@ async def parse_past_match_summary(
     fallback_comp_name: str = "",
     schedule_event_fallback: dict = None
 ):
-    cache_key = f"summary_v11_{event_id}_{target_team_id}"
+    cache_key = f"summary_v12_{event_id}_{target_team_id}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
 
-    urls_to_try = [
-        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}",
-        f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={event_id}"
-    ]
+    # Deducir el slug real del torneo si el nombre indica Champions, Europa League, Copa del Rey, etc.
+    comp_lower = (fallback_comp_name or "").lower()
+    inferred_slug = league_slug
+    if "champions" in comp_lower and "wom" not in comp_lower and "fem" not in comp_lower:
+        inferred_slug = "uefa.champions"
+    elif "europa" in comp_lower and "conf" not in comp_lower:
+        inferred_slug = "uefa.europa"
+    elif "conference" in comp_lower:
+        inferred_slug = "uefa.europa.conf"
+    elif "copa del rey" in comp_lower:
+        inferred_slug = "esp.copa_del_rey"
+    elif "pokal" in comp_lower:
+        inferred_slug = "ger.dfb_pokal"
+    elif "fa cup" in comp_lower:
+        inferred_slug = "eng.fa"
+    elif "libertadores" in comp_lower:
+        inferred_slug = "conmebol.libertadores"
+
+    slugs_to_try = []
+    for s in [inferred_slug, league_slug, "all", "uefa.champions", "esp.1", "eng.1", "ita.1", "ger.1", "fra.1", "mex.1"]:
+        if s and s not in slugs_to_try:
+            slugs_to_try.append(s)
 
     data = None
-    for url in urls_to_try:
+    for s_try in slugs_to_try[:4]:
+        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_try}/summary?event={event_id}"
         try:
             resp = await client.get(url, headers=HEADERS)
             if resp.status_code == 200:
                 cand = resp.json()
                 if isinstance(cand, dict) and cand.get("header"):
                     data = cand
-                    break
+                    # Si ya trae rosters con jugadores, nos quedamos con este inmediatamente
+                    if cand.get("rosters") and len(cand.get("rosters")) >= 2:
+                        break
         except Exception:
             continue
 
     if not data:
         if schedule_event_fallback:
-            fb = build_fallback_past_match(event_id, league_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
-            if fb:
-                DEEP_CACHE[cache_key] = fb
-            return fb
+            return build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
         return None
 
     try:
-        header_obj = data.get("header") or {}
-        header_comps = header_obj.get("competitions") or [{}]
-        header_comp = header_comps[0] if len(header_comps) > 0 else {}
-        competitors = header_comp.get("competitors") or []
+        header_obj = data.get("header") if isinstance(data.get("header"), dict) else {}
+        header_comps = header_obj.get("competitions") if isinstance(header_obj.get("competitions"), list) else [{}]
+        header_comp = header_comps[0] if len(header_comps) > 0 and isinstance(header_comps[0], dict) else {}
+        competitors = header_comp.get("competitors") if isinstance(header_comp.get("competitors"), list) else []
         if len(competitors) < 2:
             if schedule_event_fallback:
-                return build_fallback_past_match(event_id, league_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+                return build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
             return None
 
-        home_c = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
-        away_c = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+        home_c = next((c for c in competitors if isinstance(c, dict) and c.get("homeAway") == "home"), competitors[0])
+        away_c = next((c for c in competitors if isinstance(c, dict) and c.get("homeAway") == "away"), competitors[1])
 
-        home_team_d = home_c.get("team") or {}
-        away_team_d = away_c.get("team") or {}
+        home_team_d = home_c.get("team") if isinstance(home_c.get("team"), dict) else {}
+        away_team_d = away_c.get("team") if isinstance(away_c.get("team"), dict) else {}
 
         home_id_str = str(home_c.get("id") or home_team_d.get("id") or "")
         away_id_str = str(away_c.get("id") or away_team_d.get("id") or "")
@@ -627,8 +656,8 @@ async def parse_past_match_summary(
         home_abbr = home_team_d.get("abbreviation") or home_name[:3].upper()
         away_abbr = away_team_d.get("abbreviation") or away_name[:3].upper()
 
-        home_logos = home_team_d.get("logos") or []
-        away_logos = away_team_d.get("logos") or []
+        home_logos = home_team_d.get("logos") if isinstance(home_team_d.get("logos"), list) else []
+        away_logos = away_team_d.get("logos") if isinstance(away_team_d.get("logos"), list) else []
         home_logo = home_logos[0].get("href", "") if len(home_logos) > 0 and isinstance(home_logos[0], dict) else (home_team_d.get("logo") or "")
         away_logo = away_logos[0].get("href", "") if len(away_logos) > 0 and isinstance(away_logos[0], dict) else (away_team_d.get("logo") or "")
 
@@ -637,7 +666,6 @@ async def parse_past_match_summary(
         home_score = safe_int(raw_h_sc.get("value") if isinstance(raw_h_sc, dict) else raw_h_sc, 0)
         away_score = safe_int(raw_a_sc.get("value") if isinstance(raw_a_sc, dict) else raw_a_sc, 0)
 
-        # BLINDAJE: header.league a veces es dict, a veces list y a veces None en ESPN
         raw_header_lg = header_obj.get("league")
         if isinstance(raw_header_lg, list) and len(raw_header_lg) > 0:
             header_lg = raw_header_lg[0] if isinstance(raw_header_lg[0], dict) else {}
@@ -649,47 +677,46 @@ async def parse_past_match_summary(
         comp_name = (
             header_lg.get("name")
             or fallback_comp_name
-            or SLUG_TO_LEAGUE_NAME.get(league_slug, "Torneo Oficial")
+            or SLUG_TO_LEAGUE_NAME.get(inferred_slug, "Torneo Oficial")
         )
         actual_event_slug = (
             header_lg.get("slug")
             or NAME_TO_SLUG.get(str(comp_name).lower())
-            or league_slug
+            or inferred_slug
         )
 
-        home_rank = None
-        away_rank = None
-        raw_standings = data.get("standings")
-        st_groups = raw_standings.get("groups", []) if isinstance(raw_standings, dict) else []
-        for st_group in st_groups:
-            if not isinstance(st_group, dict):
-                continue
-            st_entries = (st_group.get("standings") or {}).get("entries") or []
-            for ent in st_entries:
-                if not isinstance(ent, dict):
-                    continue
-                t_info = ent.get("team") or {}
-                tid = str(t_info.get("id") or "")
-                tname = t_info.get("displayName") or ""
-                rk = next(
-                    (
-                        safe_int(s.get("value"), 0)
-                        for s in (ent.get("stats") or [])
-                        if isinstance(s, dict) and s.get("name") == "rank" and s.get("value") is not None
-                    ),
-                    None
-                )
-                if rk and 1 <= rk <= 64:
-                    save_team_rank_in_league(actual_event_slug, tid, tname, rk)
-                    if tid == home_id_str:
-                        home_rank = rk
-                    if tid == away_id_str:
-                        away_rank = rk
+        home_rank = get_verified_rank(actual_event_slug, home_c, home_id_str, home_name)
+        away_rank = get_verified_rank(actual_event_slug, away_c, away_id_str, away_name)
 
-        if not home_rank:
-            home_rank = get_verified_rank(actual_event_slug, home_c, home_id_str, home_name)
-        if not away_rank:
-            away_rank = get_verified_rank(actual_event_slug, away_c, away_id_str, away_name)
+        try:
+            raw_standings = data.get("standings")
+            st_groups = raw_standings.get("groups", []) if isinstance(raw_standings, dict) else []
+            for st_group in st_groups:
+                if not isinstance(st_group, dict):
+                    continue
+                st_entries = (st_group.get("standings") or {}).get("entries") or []
+                for ent in st_entries:
+                    if not isinstance(ent, dict):
+                        continue
+                    t_info = ent.get("team") or {}
+                    tid = str(t_info.get("id") or "")
+                    tname = t_info.get("displayName") or ""
+                    rk = next(
+                        (
+                            safe_int(s.get("value"), 0)
+                            for s in (ent.get("stats") or [])
+                            if isinstance(s, dict) and s.get("name") == "rank" and s.get("value") is not None
+                        ),
+                        None
+                    )
+                    if rk and 1 <= rk <= 64:
+                        save_team_rank_in_league(actual_event_slug, tid, tname, rk)
+                        if tid == home_id_str and not home_rank:
+                            home_rank = rk
+                        if tid == away_id_str and not away_rank:
+                            away_rank = rk
+        except Exception:
+            pass
 
         register_team_in_directory({"id": home_id_str, "displayName": home_name, "abbreviation": home_abbr, "logo": home_logo}, actual_event_slug, comp_name)
         register_team_in_directory({"id": away_id_str, "displayName": away_name, "abbreviation": away_abbr, "logo": away_logo}, actual_event_slug, comp_name)
@@ -707,7 +734,8 @@ async def parse_past_match_summary(
         date_mx, _ = convert_utc_to_mexico(header_comp.get("date") or "")
         short_score_label = f"{home_abbr} {home_score}-{away_score} {away_abbr}"
 
-        rosters = data.get("rosters") or []
+        # Extraer rosters de forma segura
+        rosters = data.get("rosters") if isinstance(data.get("rosters"), list) else []
         home_roster_obj, away_roster_obj = {}, {}
         for r_obj in rosters:
             if not isinstance(r_obj, dict):
@@ -722,57 +750,67 @@ async def parse_past_match_summary(
         if not away_roster_obj and len(rosters) > 1 and isinstance(rosters[1], dict):
             away_roster_obj = rosters[1]
 
+        home_raw_roster_list = home_roster_obj.get("roster") or home_roster_obj.get("athletes") or []
+        away_raw_roster_list = away_roster_obj.get("roster") or away_roster_obj.get("athletes") or []
+
         player_to_team_label = {}
-        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
+        for r_idx, r_list in enumerate([home_raw_roster_list, away_raw_roster_list]):
             t_label = home_abbr if r_idx == 0 else away_abbr
-            for p in (r_obj.get("roster") or []):
-                ath = p.get("athlete") or {}
+            for p in r_list:
+                if not isinstance(p, dict):
+                    continue
+                ath = p.get("athlete") if isinstance(p.get("athlete"), dict) else {}
                 if ath.get("displayName"):
                     player_to_team_label[ath.get("displayName")] = t_label
                 if ath.get("shortName"):
                     player_to_team_label[ath.get("shortName")] = t_label
 
         scorers, cards, substitutions = [], [], []
-        for ev in (data.get("keyEvents") or []):
-            if not isinstance(ev, dict):
-                continue
-            ev_type = str((ev.get("type") or {}).get("text") or "").lower()
-            clock = str((ev.get("clock") or {}).get("displayValue") or "45'")
-            participants = ev.get("participants") or []
-            main_player = (
-                (participants[0].get("athlete") or {}).get("displayName", "Jugador")
-                if len(participants) > 0 and isinstance(participants[0], dict)
-                else "Jugador"
-            )
+        try:
+            for ev in (data.get("keyEvents") or []):
+                if not isinstance(ev, dict):
+                    continue
+                ev_type = str((ev.get("type") or {}).get("text") or "").lower()
+                clock = str((ev.get("clock") or {}).get("displayValue") or "45'")
+                participants = ev.get("participants") if isinstance(ev.get("participants"), list) else []
+                main_player = "Jugador"
+                if len(participants) > 0 and isinstance(participants[0], dict):
+                    ath_p0 = participants[0].get("athlete")
+                    if isinstance(ath_p0, dict):
+                        main_player = ath_p0.get("displayName") or "Jugador"
 
-            ev_team_obj = ev.get("team") or {}
-            ev_team_id = str(ev_team_obj.get("id") or "")
-            team_short = (
-                ev_team_obj.get("abbreviation")
-                or ev_team_obj.get("displayName")
-                or team_id_to_label.get(ev_team_id)
-                or player_to_team_label.get(main_player)
-                or home_abbr
-            )
+                ev_team_obj = ev.get("team") if isinstance(ev.get("team"), dict) else {}
+                ev_team_id = str(ev_team_obj.get("id") or "")
+                team_short = (
+                    ev_team_obj.get("abbreviation")
+                    or ev_team_obj.get("displayName")
+                    or team_id_to_label.get(ev_team_id)
+                    or player_to_team_label.get(main_player)
+                    or home_abbr
+                )
 
-            if "goal" in ev_type or "penalty - scored" in ev_type:
-                scorers.append({"team": team_short, "player": main_player, "min": clock})
-            elif "yellow card" in ev_type:
-                cards.append({"team": team_short, "player": main_player, "min": clock, "type": "yellow"})
-            elif "red card" in ev_type:
-                cards.append({"team": team_short, "player": main_player, "min": clock, "type": "red"})
-            elif "substitution" in ev_type and len(participants) >= 2:
-                player_in = (participants[0].get("athlete") or {}).get("displayName", "Suplente")
-                player_out = (participants[1].get("athlete") or {}).get("displayName", "Titular")
-                substitutions.append({
-                    "team": team_short,
-                    "min": clock,
-                    "out": player_out,
-                    "in": player_in,
-                    "note": f"Entró {player_in} por {player_out} ({clock})"
-                })
+                if "goal" in ev_type or "penalty - scored" in ev_type:
+                    scorers.append({"team": team_short, "player": main_player, "min": clock})
+                elif "yellow card" in ev_type:
+                    cards.append({"team": team_short, "player": main_player, "min": clock, "type": "yellow"})
+                elif "red card" in ev_type:
+                    cards.append({"team": team_short, "player": main_player, "min": clock, "type": "red"})
+                elif "substitution" in ev_type and len(participants) >= 2:
+                    p0_ath = participants[0].get("athlete") if isinstance(participants[0], dict) else {}
+                    p1_ath = participants[1].get("athlete") if isinstance(participants[1], dict) else {}
+                    player_in = (p0_ath.get("displayName") if isinstance(p0_ath, dict) else None) or "Suplente"
+                    player_out = (p1_ath.get("displayName") if isinstance(p1_ath, dict) else None) or "Titular"
+                    substitutions.append({
+                        "team": team_short,
+                        "min": clock,
+                        "out": player_out,
+                        "in": player_in,
+                        "note": f"Entró {player_in} por {player_out} ({clock})"
+                    })
+        except Exception:
+            pass
 
-        box_teams = (data.get("boxscore") or {}).get("teams") or []
+        box_teams = ((data.get("boxscore") or {}).get("teams") or []) if isinstance(data.get("boxscore"), dict) else []
         home_box_obj, away_box_obj = {}, {}
         for bt in box_teams:
             if not isinstance(bt, dict):
@@ -791,20 +829,23 @@ async def parse_past_match_summary(
         a_official = extract_official_team_stats_from_boxscore(away_box_obj)
 
         home_rows, home_squad_table = build_pitch_and_squad_from_roster(
-            home_roster_obj.get("roster") or [], home_abbr, home_logo, substitutions
+            home_raw_roster_list, home_abbr, home_logo, substitutions
         )
         away_rows, away_squad_table = build_pitch_and_squad_from_roster(
-            away_roster_obj.get("roster") or [], away_abbr, away_logo, substitutions
+            away_raw_roster_list, away_abbr, away_logo, substitutions
         )
 
         player_perf, gk_perf = [], []
-        for r_idx, r_obj in enumerate([home_roster_obj, away_roster_obj]):
+        for r_idx, r_list in enumerate([home_raw_roster_list, away_raw_roster_list]):
             t_abbr = home_abbr if r_idx == 0 else away_abbr
             t_id = home_id_str if r_idx == 0 else away_id_str
-            for p in (r_obj.get("roster") or []):
-                ath = p.get("athlete") or {}
+            for p in r_list:
+                if not isinstance(p, dict):
+                    continue
+                ath = p.get("athlete") if isinstance(p.get("athlete"), dict) else {}
                 p_name = ath.get("displayName") or "Jugador"
-                pos = (p.get("position") or {}).get("abbreviation") or "M"
+                pos_obj = p.get("position") if isinstance(p.get("position"), dict) else {}
+                pos = pos_obj.get("abbreviation") or "M"
                 is_starter = bool(p.get("starter", False))
                 subbed_in = bool(p.get("subbedIn", False))
 
@@ -950,10 +991,7 @@ async def parse_past_match_summary(
         return parsed_obj
     except Exception:
         if schedule_event_fallback:
-            fb = build_fallback_past_match(event_id, league_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
-            if fb:
-                DEEP_CACHE[cache_key] = fb
-            return fb
+            return build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
         return None
 
 

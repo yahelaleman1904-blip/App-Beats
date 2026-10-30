@@ -100,11 +100,9 @@ export default function StatsExplorerView({
           deep?.keyPlayers?.length > 0 ? deep.keyPlayers : match.keyPlayers || [];
         const isFetchingThis = loadingDeepId === match.id;
 
-        // Obtener posición en la tabla (desde el partido o desde el historial reciente)
-        const homeRank =
-          match.homeTeam.rank || recentHome[0]?.homeRank || null;
-        const awayRank =
-          match.awayTeam.rank || recentAway[0]?.awayRank || null;
+// Toma exclusivamente la posición verificada de la competencia actual del enfrentamiento
+        const homeRank = match.homeTeam.rank || deep?.homeRank || null;
+        const awayRank = match.awayTeam.rank || deep?.awayRank || null;
 
         // Pronóstico de Tiros al Arco y Tiros Totales de Equipo (Calibrado con opciones reales de Draftea)
         const homeSoTPred =

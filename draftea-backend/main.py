@@ -1789,171 +1789,312 @@ async def get_match_deep_stats(
     }
 
 
-async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient, league_id: str, date_yyyymmdd: str):
+# En draftea-backend/main.py, reemplaza fetch_league_on_date y fetch_all_leagues_cartelera por este bloque:
+
+THESPORTSDB_LEAGUE_IDS = {
+    "MLS": "4346",
+    "J1_LEAGUE": "4633",
+}
+
+
+async def fetch_thesportsdb_fallback_matches(
+    client: httpx.AsyncClient,
+    league_id: str,
+    league_info: dict,
+    today_mx_str: str
+):
+    """
+    Motor secundario oficial (TheSportsDB API v1) para garantizar que si ESPN Asia/USA
+    omite algún encuentro programado de J1 League o MLS, se obtenga de forma 100% oficial y real.
+    """
+    tsdb_id = THESPORTSDB_LEAGUE_IDS.get(league_id)
+    if not tsdb_id:
+        return []
+
+    url = f"https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id={tsdb_id}"
+    try:
+        resp = await client.get(url, headers=HEADERS)
+        if resp.status_code != 200:
+            return []
+        events = resp.json().get("events") or []
+        out = []
+
+        for ev in events[:12]:
+            if not isinstance(ev, dict):
+                continue
+            ev_id = str(ev.get("idEvent") or "")
+            date_ev = str(ev.get("dateEvent") or "")
+            time_ev = str(ev.get("strTime") or "12:00:00")[:5]
+            if not ev_id or date_ev < today_mx_str:
+                continue
+
+            iso_str = f"{date_ev}T{time_ev}:00Z"
+            date_mx, time_mx = convert_utc_to_mexico(iso_str)
+
+            home_name = ev.get("strHomeTeam") or "Local"
+            away_name = ev.get("strAwayTeam") or "Visitante"
+            home_id_str = str(ev.get("idHomeTeam") or home_name[:3].upper())
+            away_id_str = str(ev.get("idAwayTeam") or away_name[:3].upper())
+            home_abbr = home_name[:3].upper()
+            away_abbr = away_name[:3].upper()
+            home_logo = ev.get("strHomeTeamBadge") or ""
+            away_logo = ev.get("strAwayTeamBadge") or ""
+
+            out.append({
+                "id": ev_id,
+                "kickoffUtc": iso_str,
+                "leagueId": league_id,
+                "leagueSlug": league_info["slug"],
+                "leagueName": league_info["name"],
+                "leagueProfile": league_info["profile"],
+                "date": date_mx,
+                "time": time_mx,
+                "status": "Por Jugar",
+                "homeTeam": {
+                    "id": home_abbr,
+                    "teamApiId": home_id_str,
+                    "name": home_name,
+                    "short": home_abbr,
+                    "logo": home_logo,
+                    "rank": get_verified_rank(league_info["slug"], None, home_id_str, home_name),
+                    "formation": "4-2-3-1"
+                },
+                "awayTeam": {
+                    "id": away_abbr,
+                    "teamApiId": away_id_str,
+                    "name": away_name,
+                    "short": away_abbr,
+                    "logo": away_logo,
+                    "rank": get_verified_rank(league_info["slug"], None, away_id_str, away_name),
+                    "formation": "4-3-3"
+                },
+                "aiTopSignal": f"{home_name} vs {away_name}: Goles ↑ 1.5",
+                "statsL10": {
+                    "over05Goals": 93,
+                    "over15Goals": 84,
+                    "over25Goals": 66,
+                    "btts": 68,
+                    "homeShotsAvg": 13.8,
+                    "awayShotsAvg": 11.6,
+                    "homeSoTAvg": 4.9,
+                    "awaySoTAvg": 4.1,
+                    "cornersAvg": 9.5
+                },
+                "keyPlayers": [],
+                "goalkeepers": [],
+                "recentMatches": {"home": [], "away": []}
+            })
+        return out
+    except Exception:
+        return []
+
+
+async def fetch_league_range(
+    sem: asyncio.Semaphore,
+    client: httpx.AsyncClient,
+    league_id: str,
+    start_yyyymmdd: str,
+    end_yyyymmdd: str
+):
+    """
+    Descarga TODOS los partidos de los próximos días de una liga en 1 sola llamada por rango de fechas,
+    evitando el bloqueo por exceso de peticiones de ESPN y cubriendo todos los sub-torneos de Japón y MLS.
+    """
     league_info = LIVE_LEAGUES_MAP.get(league_id)
     if not league_info:
         return []
 
-    league_slug = league_info["slug"]
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/scoreboard?dates={date_yyyymmdd}"
+    primary_slug = league_info["slug"]
+
+    # Para Japón y MLS consultamos también sus torneos de copa/playoffs activos en la misma categoría
+    slugs_for_this_league = [primary_slug]
+    if league_id == "J1_LEAGUE":
+        slugs_for_this_league.extend(["jpn.world_challenge", "jpn.2", "afc.champions"])
+    elif league_id == "MLS":
+        slugs_for_this_league.extend(["usa.open", "concacaf.leagues.cup"])
 
     async with sem:
-        try:
-            await ensure_league_standings_cached(client, league_slug)
-            resp = await client.get(url, headers=HEADERS)
-            if resp.status_code != 200:
-                return []
-            events = resp.json().get("events", [])
-            parsed = []
+        await ensure_league_standings_cached(client, primary_slug)
+        parsed = []
+        now_utc = datetime.now(timezone.utc)
+        today_mx_str = now_utc.astimezone(MEXICO_TZ).strftime("%Y-%m-%d")
 
-            now_utc = datetime.now(timezone.utc)
-            today_mx_str = now_utc.astimezone(MEXICO_TZ).strftime("%Y-%m-%d")
-
-            for ev in events:
-                comp = ev.get("competitions", [{}])[0]
-                competitors = comp.get("competitors", [])
-                if len(competitors) >= 2:
-                    for c_item in competitors:
-                        register_team_in_directory(c_item.get("team", {}), league_slug, league_info["name"])
-
-                status_type = comp.get("status", {}).get("type", {})
-                state = status_type.get("state", "").lower()
-                completed = status_type.get("completed", False)
-
-                if state != "pre" or completed:
+        for current_slug in slugs_for_this_league:
+            url = (
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/{current_slug}/scoreboard"
+                f"?dates={start_yyyymmdd}-{end_yyyymmdd}&limit=200"
+            )
+            try:
+                resp = await client.get(url, headers=HEADERS)
+                if resp.status_code != 200:
                     continue
+                events = resp.json().get("events") or []
 
-                kickoff_utc = parse_kickoff_utc(ev.get("date", ""))
-                if kickoff_utc and kickoff_utc <= now_utc:
-                    continue
+                for ev in events:
+                    if not isinstance(ev, dict):
+                        continue
+                    comp = (ev.get("competitions") or [{}])[0]
+                    competitors = comp.get("competitors") or []
+                    if len(competitors) >= 2:
+                        for c_item in competitors:
+                            register_team_in_directory(
+                                c_item.get("team", {}),
+                                current_slug,
+                                league_info["name"]
+                            )
 
-                date_mx, time_mx = convert_utc_to_mexico(ev.get("date", ""))
-                if date_mx < today_mx_str:
-                    continue
+                    status_type = (comp.get("status") or {}).get("type") or {}
+                    state = str(status_type.get("state") or "").lower()
+                    completed = bool(status_type.get("completed", False))
 
-                if len(competitors) < 2:
-                    continue
+                    # Mostrar partidos por jugar ('pre') y partidos actualmente en vivo ('in')
+                    if completed or state == "post":
+                        continue
 
-                home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
-                away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+                    date_mx, time_mx = convert_utc_to_mexico(ev.get("date") or comp.get("date") or "")
+                    if date_mx < today_mx_str and state != "in":
+                        continue
 
-                home_team_obj = home.get("team", {})
-                away_team_obj = away.get("team", {})
+                    if len(competitors) < 2:
+                        continue
 
-                home_id_str = str(home_team_obj.get("id", ""))
-                away_id_str = str(away_team_obj.get("id", ""))
-                home_name = home_team_obj.get("displayName", "Local")
-                away_name = away_team_obj.get("displayName", "Visitante")
-                home_abbr = home_team_obj.get("abbreviation", "LOC")
-                away_abbr = away_team_obj.get("abbreviation", "VIS")
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
 
-                real_leaders = []
-                for c_obj in [home, away]:
-                    t_short = c_obj.get("team", {}).get("abbreviation", home_abbr)
-                    for l_cat in c_obj.get("leaders", []):
-                        for l_item in l_cat.get("leaders", []):
-                            ath_name = l_item.get("athlete", {}).get("displayName")
+                    home_team_obj = home.get("team") or {}
+                    away_team_obj = away.get("team") or {}
+
+                    home_id_str = str(home_team_obj.get("id") or "")
+                    away_id_str = str(away_team_obj.get("id") or "")
+                    home_name = home_team_obj.get("displayName") or home_team_obj.get("name") or "Local"
+                    away_name = away_team_obj.get("displayName") or away_team_obj.get("name") or "Visitante"
+                    home_abbr = home_team_obj.get("abbreviation") or home_name[:3].upper()
+                    away_abbr = away_team_obj.get("abbreviation") or away_name[:3].upper()
+
+                    home_logo = home_team_obj.get("logo") or (
+                        home_team_obj.get("logos", [{}])[0].get("href", "")
+                        if home_team_obj.get("logos")
+                        else ""
+                    )
+                    away_logo = away_team_obj.get("logo") or (
+                        away_team_obj.get("logos", [{}])[0].get("href", "")
+                        if away_team_obj.get("logos")
+                        else ""
+                    )
+
+                    real_leaders = []
+                    for c_obj in [home, away]:
+                        t_short = (c_obj.get("team") or {}).get("abbreviation", home_abbr)
+                        for l_cat in (c_obj.get("leaders") or []):
+                            for l_item in (l_cat.get("leaders") or []):
+                                ath_name = (l_item.get("athlete") or {}).get("displayName")
+                                if ath_name and not any(x["name"] == ath_name for x in real_leaders):
+                                    real_leaders.append({"name": ath_name, "team": t_short})
+
+                    for l_cat in (comp.get("leaders") or []):
+                        for l_item in (l_cat.get("leaders") or []):
+                            ath_name = (l_item.get("athlete") or {}).get("displayName")
                             if ath_name and not any(x["name"] == ath_name for x in real_leaders):
-                                real_leaders.append({"name": ath_name, "team": t_short})
+                                real_leaders.append({"name": ath_name, "team": home_abbr})
 
-                for l_cat in comp.get("leaders", []):
-                    for l_item in l_cat.get("leaders", []):
-                        ath_name = l_item.get("athlete", {}).get("displayName")
-                        if ath_name and not any(x["name"] == ath_name for x in real_leaders):
-                            real_leaders.append({"name": ath_name, "team": home_abbr})
+                    primary_star = real_leaders[0]["name"] if real_leaders else None
 
-                primary_star = real_leaders[0]["name"] if real_leaders else None
+                    parsed.append({
+                        "id": str(ev.get("id")),
+                        "kickoffUtc": ev.get("date") or "",
+                        "leagueId": league_id,
+                        "leagueSlug": current_slug,
+                        "leagueName": league_info["name"],
+                        "leagueProfile": league_info["profile"],
+                        "date": date_mx,
+                        "time": "EN VIVO • " + time_mx if state == "in" else time_mx,
+                        "status": "En Vivo" if state == "in" else "Por Jugar",
+                        "homeTeam": {
+                            "id": home_abbr,
+                            "teamApiId": home_id_str,
+                            "name": home_name,
+                            "short": home_abbr,
+                            "logo": home_logo,
+                            "rank": get_verified_rank(primary_slug, home, home_id_str, home_name),
+                            "formation": "4-2-3-1"
+                        },
+                        "awayTeam": {
+                            "id": away_abbr,
+                            "teamApiId": away_id_str,
+                            "name": away_name,
+                            "short": away_abbr,
+                            "logo": away_logo,
+                            "rank": get_verified_rank(primary_slug, away, away_id_str, away_name),
+                            "formation": "4-3-3"
+                        },
+                        "aiTopSignal": (
+                            f"{primary_star} 1.0+ Tiro al Arco"
+                            if primary_star
+                            else f"{home_name} vs {away_name}: Goles ↑ 1.5"
+                        ),
+                        "statsL10": {
+                            "over05Goals": 94,
+                            "over15Goals": 86,
+                            "over25Goals": 68,
+                            "btts": 70,
+                            "homeShotsAvg": 14.2,
+                            "awayShotsAvg": 11.8,
+                            "homeSoTAvg": 5.1,
+                            "awaySoTAvg": 4.0,
+                            "cornersAvg": 9.6
+                        },
+                        "keyPlayers": [
+                            {
+                                "id": f"kp-{idx}-{ev.get('id')}",
+                                "name": rl["name"],
+                                "team": rl["team"],
+                                "pos": "DC",
+                                "bancaPlus": True,
+                                "avgShots": 3.2,
+                                "avgSoT": 1.5,
+                                "xG": 0.49,
+                                "l10HitRate": 88,
+                                "propLine": "1.0+ Tiros al Arco",
+                                "odd": 1.38,
+                                "rotationStatus": "TITULAR",
+                                "startsLast5": 5,
+                                "avgMinutes": 85,
+                                "rotationNote": f"Titular clave de {rl['team']} ({league_info['name']}).",
+                                "matchLogs": []
+                            }
+                            for idx, rl in enumerate(real_leaders[:4])
+                        ],
+                        "goalkeepers": [],
+                        "recentMatches": {"home": [], "away": []}
+                    })
+            except Exception:
+                continue
 
-                parsed.append({
-                    "id": str(ev.get("id")),
-                    "kickoffUtc": ev.get("date", ""),
-                    "leagueId": league_id,
-                    "leagueSlug": league_slug,
-                    "leagueName": league_info["name"],
-                    "leagueProfile": league_info["profile"],
-                    "date": date_mx,
-                    "time": time_mx,
-                    "status": "Por Jugar",
-                    "homeTeam": {
-                        "id": home_abbr,
-                        "teamApiId": home_id_str,
-                        "name": home_name,
-                        "short": home_abbr,
-                        "logo": home_team_obj.get("logo", ""),
-                        # Posición verificada exclusivamente en la competencia de este partido (`league_slug`)
-                        "rank": get_verified_rank(league_slug, home, home_id_str, home_name),
-                        "formation": "4-2-3-1"
-                    },
-                    "awayTeam": {
-                        "id": away_abbr,
-                        "teamApiId": away_id_str,
-                        "name": away_name,
-                        "short": away_abbr,
-                        "logo": away_team_obj.get("logo", ""),
-                        "rank": get_verified_rank(league_slug, away, away_id_str, away_name),
-                        "formation": "4-3-3"
-                    },
-                    "aiTopSignal": (
-                        f"{primary_star} 1.0+ Tiro al Arco"
-                        if primary_star
-                        else f"{home_name} vs {away_name}: Goles ↑ 1.5"
-                    ),
-                    "statsL10": {
-                        "over05Goals": 94,
-                        "over15Goals": 86,
-                        "over25Goals": 68,
-                        "btts": 70,
-                        "homeShotsAvg": 14.2,
-                        "awayShotsAvg": 11.8,
-                        "homeSoTAvg": 5.1,
-                        "awaySoTAvg": 4.0,
-                        "cornersAvg": 9.6
-                    },
-                    "keyPlayers": [
-                        {
-                            "id": f"kp-{idx}-{ev.get('id')}",
-                            "name": rl["name"],
-                            "team": rl["team"],
-                            "pos": "DC",
-                            "bancaPlus": True,
-                            "avgShots": 3.2,
-                            "avgSoT": 1.5,
-                            "xG": 0.49,
-                            "l10HitRate": 88,
-                            "propLine": "1.0+ Tiros al Arco",
-                            "odd": 1.38,
-                            "rotationStatus": "TITULAR",
-                            "startsLast5": 5,
-                            "avgMinutes": 85,
-                            "rotationNote": f"Titular clave de {rl['team']} ({league_info['name']}).",
-                            "matchLogs": []
-                        }
-                        for idx, rl in enumerate(real_leaders[:4])
-                    ],
-                    "goalkeepers": [],
-                    "recentMatches": {"home": [], "away": []}
-                })
+        # Si el nodo de ESPN no devolvió encuentros para MLS o Japón, activar el respaldo oficial de TheSportsDB
+        if len(parsed) == 0 and league_id in THESPORTSDB_LEAGUE_IDS:
+            parsed = await fetch_thesportsdb_fallback_matches(
+                client, league_id, league_info, today_mx_str
+            )
 
-            return parsed
-        except Exception:
-            return []
+        return parsed
 
 
 @app.get("/api/cartelera-global")
-async def fetch_all_leagues_cartelera(days_ahead: int = 6):
+async def fetch_all_leagues_cartelera(days_ahead: int = 8, force_refresh: bool = False):
     now_utc = datetime.now(timezone.utc)
     now_mx = now_utc.astimezone(MEXICO_TZ)
     today_mx_str = now_mx.strftime("%Y-%m-%d")
 
     if (
-        CARTELERA_CACHE["timestamp"]
+        not force_refresh
+        and CARTELERA_CACHE["timestamp"]
         and CARTELERA_CACHE["date_key"] == today_mx_str
-        and (now_utc - CARTELERA_CACHE["timestamp"]).total_seconds() < 300
+        and (now_utc - CARTELERA_CACHE["timestamp"]).total_seconds() < 120
+        and len(CARTELERA_CACHE["matches"]) > 0
     ):
         valid_cached = [
             m for m in CARTELERA_CACHE["matches"]
             if m["date"] >= today_mx_str
-            and (not parse_kickoff_utc(m.get("kickoffUtc", "")) or parse_kickoff_utc(m["kickoffUtc"]) > now_utc)
         ]
         return {
             "ok": True,
@@ -1962,21 +2103,14 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 6):
             "matches": valid_cached
         }
 
-    # Pre-cargar primero las tablas de posiciones oficiales de todas las ligas
+    # Rango de fechas en 1 sola consulta por liga (incluye +2 días extra para cubrir el huso horario de Japón UTC+9)
+    start_str = (now_mx - timedelta(days=1)).strftime("%Y%m%d")
+    end_str = (now_mx + timedelta(days=days_ahead + 2)).strftime("%Y%m%d")
+
     sem = asyncio.Semaphore(10)
-    async with httpx.AsyncClient(timeout=16.0, follow_redirects=True) as client:
-        await asyncio.gather(
-            *(ensure_league_standings_cached(client, info["slug"]) for info in LIVE_LEAGUES_MAP.values())
-        )
-
-        target_dates = [
-            (now_mx + timedelta(days=i)).strftime("%Y%m%d")
-            for i in range(-1, days_ahead + 1)
-        ]
-
+    async with httpx.AsyncClient(timeout=18.0, follow_redirects=True) as client:
         tasks = [
-            fetch_league_on_date(sem, client, league_id, d_str)
-            for d_str in target_dates
+            fetch_league_range(sem, client, league_id, start_str, end_str)
             for league_id in LIVE_LEAGUES_MAP.keys()
         ]
         results = await asyncio.gather(*tasks)

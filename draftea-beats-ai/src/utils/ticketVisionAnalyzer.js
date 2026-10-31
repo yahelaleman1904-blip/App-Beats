@@ -55,7 +55,35 @@ const KNOWN_CLUB_ALIASES = [
   { keys: ['pachuca', 'pac'], label: 'Pachuca', code: 'pac' },
   { keys: ['tijuana', 'xolos', 'tij'], label: 'Tijuana', code: 'tij' },
   { keys: ['brisbane', 'bri'], label: 'Brisbane Roar FC', code: 'bri' },
-  { keys: ['perth', 'per'], label: 'Perth Glory FC', code: 'per' }
+  { keys: ['perth', 'per'], label: 'Perth Glory FC', code: 'per' },
+  // Clubes MLS
+  { keys: ['inter miami', 'miami', 'mia'], label: 'Inter Miami CF', code: 'mia' },
+  { keys: ['lafc', 'los angeles fc'], label: 'LAFC', code: 'lafc' },
+  { keys: ['la galaxy', 'galaxy', 'lag'], label: 'LA Galaxy', code: 'lag' },
+  { keys: ['columbus', 'crew', 'clb'], label: 'Columbus Crew', code: 'clb' },
+  { keys: ['cincinnati', 'cin'], label: 'FC Cincinnati', code: 'cin' },
+  { keys: ['seattle', 'sounders', 'sea'], label: 'Seattle Sounders FC', code: 'sea' },
+  { keys: ['nycfc', 'new york city'], label: 'New York City FC', code: 'nyc' },
+  { keys: ['red bulls', 'nyrb', 'rbny'], label: 'New York Red Bulls', code: 'rbny' },
+  { keys: ['atlanta united', 'atl'], label: 'Atlanta United', code: 'atl' },
+  { keys: ['orlando city', 'orl'], label: 'Orlando City SC', code: 'orl' },
+  { keys: ['houston dynamo', 'hou'], label: 'Houston Dynamo FC', code: 'hou' },
+  { keys: ['real salt lake', 'rsl'], label: 'Real Salt Lake', code: 'rsl' },
+  { keys: ['vancouver', 'whitecaps', 'van'], label: 'Vancouver Whitecaps', code: 'van' },
+  { keys: ['charlotte', 'clt'], label: 'Charlotte FC', code: 'clt' },
+
+  // Clubes J1 League Japón
+  { keys: ['vissel kobe', 'kobe', 'kob'], label: 'Vissel Kobe', code: 'kob' },
+  { keys: ['sanfrecce', 'hiroshima', 'hir'], label: 'Sanfrecce Hiroshima', code: 'hir' },
+  { keys: ['machida', 'zelvia', 'mac'], label: 'Machida Zelvia', code: 'mac' },
+  { keys: ['gamba osaka', 'gamba', 'gam'], label: 'Gamba Osaka', code: 'gam' },
+  { keys: ['kashima', 'antlers', 'kas'], label: 'Kashima Antlers', code: 'kas' },
+  { keys: ['yokohama', 'marinos', 'yfm'], label: 'Yokohama F. Marinos', code: 'yfm' },
+  { keys: ['urawa', 'red diamonds', 'ura'], label: 'Urawa Red Diamonds', code: 'ura' },
+  { keys: ['kawasaki', 'frontale', 'kaw'], label: 'Kawasaki Frontale', code: 'kaw' },
+  { keys: ['cerezo osaka', 'cerezo', 'cer'], label: 'Cerezo Osaka', code: 'cer' },
+  { keys: ['fc tokyo', 'tokyo', 'tok'], label: 'FC Tokyo', code: 'tok' },
+  { keys: ['nagoya', 'grampus', 'nag'], label: 'Nagoya Grampus', code: 'nag' }
 ];
 
 function matchClubFromText(text) {

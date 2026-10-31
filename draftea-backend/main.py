@@ -669,7 +669,21 @@ async def parse_past_match_summary(
         inferred_slug = "conmebol.libertadores"
 
     slugs_to_try = []
-    for s in [inferred_slug, league_slug, "all", "uefa.champions", "esp.1", "eng.1", "ita.1", "ger.1", "fra.1", "mex.1"]:
+    for s in [
+        inferred_slug,
+        league_slug,
+        "all",
+        "uefa.champions",
+        "esp.1",
+        "eng.1",
+        "ita.1",
+        "ger.1",
+        "fra.1",
+        "mex.1",
+        "usa.1",
+        "jpn.1",
+        "ksa.1"
+    ]:
         if s and s not in slugs_to_try:
             slugs_to_try.append(s)
 
@@ -1105,6 +1119,10 @@ async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id
         candidate_slugs.append("uefa.champions")
     elif base_domestic in ["arg.1", "bra.1", "col.1"]:
         candidate_slugs.append("conmebol.libertadores")
+    elif base_domestic in ["mex.1", "usa.1"]:
+        candidate_slugs.extend(["concacaf.champions", "concacaf.leagues.cup"])
+    elif base_domestic in ["jpn.1", "ksa.1", "aus.1"]:
+        candidate_slugs.append("afc.champions")
 
     seen_slugs = []
     for s in candidate_slugs:

@@ -13,6 +13,12 @@ export const LEAGUES_CATALOG = [
     logo: 'https://a.espncdn.com/i/leaguelogos/soccer/500/22.png'
   },
   {
+    id: 'MLS',
+    name: 'MLS',
+    short: 'MLS',
+    logo: 'https://a.espncdn.com/i/leaguelogos/soccer/500/19.png'
+  },
+  {
     id: 'LALIGA',
     name: 'LaLiga EA Sports',
     short: 'ESP',
@@ -71,6 +77,12 @@ export const LEAGUES_CATALOG = [
     name: 'Saudi Pro League',
     short: 'KSA',
     logo: 'https://a.espncdn.com/i/leaguelogos/soccer/500/2488.png'
+  },
+  {
+    id: 'J1_LEAGUE',
+    name: 'J1 League Japón',
+    short: 'JPN',
+    logo: 'https://a.espncdn.com/i/leaguelogos/soccer/500/2199.png'
   },
   {
     id: 'UCL',

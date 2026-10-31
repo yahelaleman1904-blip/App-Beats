@@ -1,11 +1,10 @@
 // src/components/ClubSearchView.jsx
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   Loader2,
   X
 } from 'lucide-react';
-import { API_BASE_URL } from '../utils/apiConfig';
 import { triggerHaptic } from '../utils/haptics';
 import {
   InteractivePitchNode,
@@ -13,94 +12,59 @@ import {
   SquadConvocadosTable
 } from './InteractivePitchAndTable';
 
-export default function ClubSearchView({ allMatches }) {
-  const [searchQuery, setSearchQuery] = useState('');
+export default function ClubSearchView({ apiBaseUrl }) {
+  const [query, setQuery] = useState('');
   const [suggestions, setSuggestions] = useState([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+
   const [selectedClub, setSelectedClub] = useState(null);
   const [clubProfile, setClubProfile] = useState(null);
-  const [isLoadingProfile, setIsLoadingProfile] = useState(false);
+  const [loadingProfile, setLoadingProfile] = useState(false);
 
-  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
-  const [activeClubTab, setActiveClubTab] = useState('overview');
+  const [inspectedMatch, setInspectedMatch] = useState(null);
+  const [activeClubTab, setActiveClubTab] = useState('lineup');
   const [modalPlayer, setModalPlayer] = useState(null);
 
-  const stripEmojis = (str) =>
-    String(str || '')
-      .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '')
-      .trim();
-
-  const localCatalog = useMemo(() => {
-    const map = {};
-    allMatches.forEach((m) => {
-      if (m.homeTeam?.teamApiId) {
-        map[m.homeTeam.teamApiId] = {
-          teamId: m.homeTeam.teamApiId,
-          name: m.homeTeam.name,
-          short: m.homeTeam.short,
-          logo: m.homeTeam.logo,
-          leagueSlug: m.leagueSlug,
-          leagueName: m.leagueName
-        };
-      }
-      if (m.awayTeam?.teamApiId) {
-        map[m.awayTeam.teamApiId] = {
-          teamId: m.awayTeam.teamApiId,
-          name: m.awayTeam.name,
-          short: m.awayTeam.short,
-          logo: m.awayTeam.logo,
-          leagueSlug: m.leagueSlug,
-          leagueName: m.leagueName
-        };
-      }
-    });
-    return Object.values(map);
-  }, [allMatches]);
-
   useEffect(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) {
-      setSuggestions(localCatalog.slice(0, 10));
-      return;
-    }
-
-    const localFiltered = localCatalog.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.short.toLowerCase().includes(q)
-    );
-    setSuggestions(localFiltered.slice(0, 10));
-
+    let active = true;
     const timer = setTimeout(async () => {
+      setLoadingSuggestions(true);
       try {
         const res = await fetch(
-          `${API_BASE_URL}/api/teams/search?q=${encodeURIComponent(searchQuery)}`
+          `${apiBaseUrl}/api/teams/search?q=${encodeURIComponent(query)}`
         );
         const data = await res.json();
-        if (data.ok && Array.isArray(data.teams) && data.teams.length > 0) {
-          setSuggestions(data.teams);
+        if (active && data.ok) {
+          setSuggestions(data.teams || []);
         }
       } catch {
-        // Ignorar
+        // Silencioso
+      } finally {
+        if (active) setLoadingSuggestions(false);
       }
-    }, 200);
+    }, 180);
 
-    return () => clearTimeout(timer);
-  }, [searchQuery, localCatalog]);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [query, apiBaseUrl]);
 
   const handleSelectClub = async (club) => {
     triggerHaptic('medium');
     setSelectedClub(club);
-    setSearchQuery('');
-    setIsLoadingProfile(true);
-    setActiveMatchIndex(0);
-    setActiveClubTab('overview');
+    setLoadingProfile(true);
+    setClubProfile(null);
+    setInspectedMatch(null);
 
     try {
-      const url = `${API_BASE_URL}/api/team-profile?team_id=${encodeURIComponent(
+      const url = `${apiBaseUrl}/api/team-profile?team_id=${encodeURIComponent(
         club.teamId
       )}&league_slug=${encodeURIComponent(
-        club.leagueSlug || 'esp.1'
-      )}&team_name=${encodeURIComponent(club.name)}&team_abbr=${encodeURIComponent(
+        club.leagueSlug
+      )}&team_name=${encodeURIComponent(
+        club.name
+      )}&team_abbr=${encodeURIComponent(
         club.short
       )}&team_logo=${encodeURIComponent(club.logo || '')}`;
 
@@ -108,260 +72,291 @@ export default function ClubSearchView({ allMatches }) {
       const data = await res.json();
       if (data.ok) {
         setClubProfile(data);
+        setInspectedMatch(data.latestMatch || data.last5Matches?.[0] || null);
       }
-    } catch (err) {
-      console.error('Error cargando perfil del club:', err);
+    } catch {
+      // Silencioso
     } finally {
-      setIsLoadingProfile(false);
+      setLoadingProfile(false);
     }
   };
 
-  const inspectedMatch =
-    clubProfile?.last5Matches?.[activeMatchIndex] || clubProfile?.latestMatch;
+  const getResultBadge = (res) => {
+    if (res === 'W') return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40';
+    if (res === 'D') return 'bg-amber-500/20 text-amber-300 border-amber-500/40';
+    return 'bg-red-500/20 text-red-400 border-red-500/40';
+  };
 
   return (
     <div className="space-y-3">
-      {/* BUSCADOR LIMPIO */}
+      {/* BUSCADOR */}
       <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3 space-y-2.5">
-        <h2 className="text-xs font-extrabold uppercase tracking-wider text-purple-400">
-          BUSCADOR DE CLUBES
-        </h2>
-
         <div className="relative">
-          <div className="flex items-center bg-[#0b0d13] border border-gray-700 focus-within:border-purple-400 rounded-xl px-3 py-2">
-            <Search className="w-4 h-4 text-gray-400 mr-2 shrink-0" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Buscar club..."
-              className="w-full bg-transparent text-xs sm:text-sm font-bold text-white focus:outline-none"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="text-gray-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            )}
-          </div>
+          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar club (ej. Barcelona, Real Madrid, Betis, América...)"
+            className="w-full bg-[#0b0d13] border border-gray-800 focus:border-purple-500 rounded-xl pl-9 pr-9 py-2 text-xs text-white placeholder-gray-500 outline-none"
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic('light');
+                setQuery('');
+              }}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
 
-          {(searchQuery.trim().length > 0 || !selectedClub) &&
-            suggestions.length > 0 && (
-              <div className="mt-2 bg-[#0b0d13] border border-gray-800 rounded-xl divide-y divide-gray-800/80 max-h-60 overflow-y-auto">
-                {suggestions.map((club) => (
-                  <button
-                    key={`${club.teamId}-${club.name}`}
-                    onClick={() => handleSelectClub(club)}
-                    className="w-full flex items-center justify-between px-3 py-2 hover:bg-purple-600/20 text-left transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      {club.logo ? (
-                        <img
-                          src={club.logo}
-                          alt={club.name}
-                          className="w-6 h-6 object-contain shrink-0"
-                        />
-                      ) : (
-                        <div className="w-6 h-6 rounded-full bg-gray-800 text-[9px] font-black flex items-center justify-center text-white">
-                          {club.short}
-                        </div>
-                      )}
-                      <div className="truncate">
-                        <p className="text-xs font-extrabold text-white truncate">
-                          {club.name}
-                        </p>
-                        <span className="text-[10px] text-gray-400">
-                          {club.leagueName} • {club.short}
-                        </span>
-                      </div>
-                    </div>
-                    <span className="text-[10px] font-bold text-purple-400 shrink-0">
-                      Abrir
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+          {loadingSuggestions ? (
+            <div className="flex items-center gap-2 text-xs text-gray-400 py-1 px-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" />
+              <span>Buscando...</span>
+            </div>
+          ) : (
+            suggestions.map((club) => {
+              const isSelected = selectedClub?.teamId === club.teamId;
+              return (
+                <button
+                  key={`${club.leagueSlug}-${club.teamId}`}
+                  type="button"
+                  onClick={() => handleSelectClub(club)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-left shrink-0 transition-all cursor-pointer ${
+                    isSelected
+                      ? 'bg-purple-600/25 border-purple-400 text-white'
+                      : 'bg-[#0b0d13] border-gray-800 text-gray-300 hover:border-gray-700'
+                  }`}
+                >
+                  {club.logo && (
+                    <img src={club.logo} alt={club.name} className="w-4 h-4 object-contain" />
+                  )}
+                  <span className="text-[11px] font-extrabold">{club.name}</span>
+                </button>
+              );
+            })
+          )}
         </div>
       </div>
 
-      {isLoadingProfile && (
-        <div className="py-12 flex items-center justify-center gap-2 bg-[#141824] rounded-2xl border border-gray-800">
+      {/* PERFIL DEL CLUB */}
+      {loadingProfile && (
+        <div className="bg-[#141824] border border-gray-800 rounded-2xl p-8 flex items-center justify-center gap-2">
           <Loader2 className="w-5 h-5 text-purple-400 animate-spin" />
-          <span className="text-xs font-bold text-gray-300">Cargando club...</span>
+          <span className="text-xs font-bold text-gray-300">
+            Cargando partidos de {selectedClub?.name}...
+          </span>
         </div>
       )}
 
-      {!isLoadingProfile && selectedClub && clubProfile && (
+      {clubProfile && !loadingProfile && (
         <div className="space-y-3">
-          {/* CABECERA DEL CLUB */}
-          <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3.5 flex items-center gap-3">
-            {selectedClub.logo && (
-              <img
-                src={selectedClub.logo}
-                alt={selectedClub.name}
-                className="w-11 h-11 object-contain shrink-0"
-              />
-            )}
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm sm:text-base font-black text-white truncate">
-                  {selectedClub.name}
+          {/* CABECERA COMPACTA DEL CLUB */}
+          <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {clubProfile.club.logo && (
+                <img
+                  src={clubProfile.club.logo}
+                  alt={clubProfile.club.name}
+                  className="w-9 h-9 object-contain shrink-0"
+                />
+              )}
+              <div className="min-w-0">
+                <h3 className="text-sm font-black text-white truncate">
+                  {clubProfile.club.name}
                 </h3>
-                <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">
-                  {selectedClub.short}
+                <span className="text-[10px] font-bold text-purple-300 block truncate">
+                  GF: {clubProfile.tactics?.avgGoalsFor}/J • GC: {clubProfile.tactics?.avgGoalsAgainst}/J • Arco: {clubProfile.tactics?.avgSoT}/J
                 </span>
               </div>
-              <p className="text-[11px] font-bold text-emerald-400 mt-0.5">
-                {stripEmojis(clubProfile.tactics?.styleTag)}
-              </p>
             </div>
           </div>
 
-          {/* BOTONES DE VISTAS SOLO CON TÍTULOS */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
-            {[
-              { id: 'overview', label: 'Resumen' },
-              { id: 'squad', label: 'Convocados' },
-              { id: 'lineup', label: 'Alineación' },
-              { id: 'stats', label: 'Estadísticas' }
-            ].map((btn) => {
-              const active = activeClubTab === btn.id;
-              return (
-                <button
-                  key={btn.id}
-                  onClick={() => {
-                    triggerHaptic('light');
-                    setActiveClubTab(btn.id);
-                  }}
-                  className={`px-3.5 py-1.5 rounded-full text-[11px] font-extrabold whitespace-nowrap border transition-all cursor-pointer ${
-                    active
-                      ? 'bg-white text-black border-white'
-                      : 'bg-[#181d2a] text-gray-300 border-gray-700'
-                  }`}
-                >
-                  {btn.label}
-                </button>
-              );
-            })}
-          </div>
+          {/* TIRA DE ÚLTIMOS 5 PARTIDOS CON POSICIÓN EN LA TABLA (#) */}
+          <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3 space-y-2">
+            <span className="text-[10px] font-extrabold uppercase text-gray-400 block">
+              ÚLTIMOS 5 PARTIDOS OFICIALES
+            </span>
 
-          {/* TIRA HORIZONTAL DE ÚLTIMOS 5 PARTIDOS */}
-          {clubProfile.last5Matches?.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
-              {clubProfile.last5Matches.map((m, idx) => {
-                const isCurrent = activeMatchIndex === idx;
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-1.5">
+              {clubProfile.last5Matches?.map((m) => {
+                const active = inspectedMatch?.id === m.id;
                 return (
                   <button
                     key={m.id}
+                    type="button"
                     onClick={() => {
                       triggerHaptic('light');
-                      setActiveMatchIndex(idx);
+                      setInspectedMatch(m);
                     }}
                     className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${
-                      isCurrent
+                      active
                         ? 'bg-purple-600/25 border-purple-400'
-                        : 'bg-[#141824] border-gray-800'
+                        : 'bg-[#0b0d13] border-gray-800 hover:border-gray-700'
                     }`}
                   >
-                    <div className="flex items-center justify-between text-[9px] font-bold text-purple-300 mb-0.5">
-                      <span className="truncate">{m.competition}</span>
-                      <span className="shrink-0 ml-1">{m.date}</span>
+                    <div className="flex items-center justify-between mb-1">
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[9px] font-black border ${getResultBadge(
+                          m.result
+                        )}`}
+                      >
+                        {m.result}
+                      </span>
+                      <span className="text-[9px] text-gray-400 font-bold">{m.date}</span>
                     </div>
-                    <p className="text-xs font-black text-white truncate">
-                      {m.homeAbbr || m.homeName}{' '}
-                      <span className="text-emerald-400">
-                        {m.homeScore}-{m.awayScore}
-                      </span>{' '}
-                      {m.awayAbbr || m.awayName}
+                    <p className="text-[11px] font-extrabold text-white truncate">
+                      {m.homeRank ? `#${m.homeRank} ` : ''}{m.homeAbbr}{' '}
+                      <span className="text-emerald-400">{m.homeScore}-{m.awayScore}</span>{' '}
+                      {m.awayRank ? `#${m.awayRank} ` : ''}{m.awayAbbr}
                     </p>
+                    <span className="text-[9px] font-bold text-purple-300 block truncate mt-0.5">
+                      {m.competition}
+                    </span>
                   </button>
                 );
               })}
             </div>
-          )}
+          </div>
 
+          {/* INSPECTOR DEL PARTIDO SELECCIONADO */}
           {inspectedMatch && (
-            <>
-              {activeClubTab === 'overview' && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
-                  <div className="lg:col-span-7 rounded-2xl overflow-hidden border border-emerald-700/60 bg-gradient-to-b from-[#256343] via-[#2b724e] to-[#256343]">
-                    <div className="bg-black/45 px-3 py-2 flex items-center justify-between border-b border-white/15">
-                      <span className="text-xs font-extrabold text-white">
-                        {inspectedMatch.homeName} {inspectedMatch.homeScore} - {inspectedMatch.awayScore} {inspectedMatch.awayName}
-                      </span>
-                      <span className="text-[10px] text-emerald-300 font-bold">
-                        {inspectedMatch.competition}
-                      </span>
-                    </div>
+            <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2 border-b border-gray-800 pb-2.5">
+                <div>
+                  <span className="text-[9px] font-extrabold text-purple-400 uppercase block">
+                    {inspectedMatch.competition} • {inspectedMatch.fullDate}
+                  </span>
+                  <h4 className="text-xs sm:text-sm font-black text-white">
+                    {inspectedMatch.homeRank ? `#${inspectedMatch.homeRank} ` : ''}
+                    {inspectedMatch.homeName}{' '}
+                    <span className="text-emerald-400">
+                      {inspectedMatch.homeScore} - {inspectedMatch.awayScore}
+                    </span>{' '}
+                    {inspectedMatch.awayRank ? `#${inspectedMatch.awayRank} ` : ''}
+                    {inspectedMatch.awayName}
+                  </h4>
+                </div>
 
-                    <div className="py-3 px-1.5 space-y-3.5 border-b border-white/25">
-                      {inspectedMatch.teamLineupRows?.map((row, rIdx) => (
-                        <div key={rIdx} className="flex items-center justify-around gap-1">
-                          {row.map((player, pIdx) => (
-                            <InteractivePitchNode
-                              key={pIdx}
-                              player={player}
-                              onSelectPlayer={setModalPlayer}
-                            />
-                          ))}
-                        </div>
-                      ))}
-                    </div>
+                <div className="flex items-center gap-1">
+                  {[
+                    { id: 'lineup', label: 'Alineación' },
+                    { id: 'squad', label: 'Convocados' }
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic('light');
+                        setActiveClubTab(t.id);
+                      }}
+                      className={`px-3 py-1 rounded-full text-[11px] font-extrabold cursor-pointer transition-all ${
+                        activeClubTab === t.id
+                          ? 'bg-white text-black'
+                          : 'bg-[#0b0d13] text-gray-300 border border-gray-700'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-                    <div className="py-3 px-1.5 space-y-3.5">
-                      {inspectedMatch.oppLineupRows?.map((row, rIdx) => (
-                        <div key={rIdx} className="flex items-center justify-around gap-1">
-                          {row.map((player, pIdx) => (
-                            <InteractivePitchNode
-                              key={pIdx}
-                              player={player}
-                              onSelectPlayer={setModalPlayer}
-                            />
-                          ))}
-                        </div>
-                      ))}
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-center">
+                {[
+                  { label: 'Tiros', vals: inspectedMatch.stats.shots },
+                  { label: 'Al Arco', vals: inspectedMatch.stats.sot },
+                  { label: 'Atajadas', vals: inspectedMatch.stats.saves || [0, 0] },
+                  { label: 'Córners', vals: inspectedMatch.stats.corners },
+                  { label: 'Tarjetas', vals: inspectedMatch.stats.cards || [0, 0] },
+                  { label: 'Posesión', vals: inspectedMatch.stats.possession }
+                ].map((st) => (
+                  <div
+                    key={st.label}
+                    className="bg-[#0b0d13] border border-gray-800 rounded-lg p-1.5"
+                  >
+                    <span className="text-[9px] text-gray-400 block">{st.label}</span>
+                    <span className="text-[11px] font-black text-white">
+                      {st.vals[0]} - {st.vals[1]}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {activeClubTab === 'lineup' && (
+                <div className="rounded-xl overflow-hidden border border-emerald-700/60 bg-[#35684c] relative">
+                  {/* Cabecera Equipo Local (Arriba) */}
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-black/25 border-b border-white/15 text-[10px] font-extrabold text-white">
+                    <div className="flex items-center gap-1.5">
+                      {inspectedMatch.homeLogo && (
+                        <img src={inspectedMatch.homeLogo} alt="" className="w-3.5 h-3.5 object-contain" />
+                      )}
+                      <span>{inspectedMatch.homeName}</span>
                     </div>
+                    <span className="px-2 py-0.5 rounded bg-black/40 text-emerald-300">
+                      {inspectedMatch.homeFormation || inspectedMatch.teamFormation}
+                    </span>
                   </div>
 
-                  <div className="lg:col-span-5 bg-[#141824] border border-gray-800 rounded-2xl p-3.5 space-y-3">
-                    <h4 className="text-xs font-black text-white uppercase border-b border-gray-800 pb-2">
-                      ESTADÍSTICAS DEL PARTIDO
-                    </h4>
+                  {/* Mitad Superior: Portero Arriba -> Delanteros en el Centro */}
+                  <div className="py-3.5 px-1.5 space-y-3.5 border-b border-white/30 relative">
+                    <div className="w-28 h-10 border-b border-x border-white/25 mx-auto -mt-3.5 mb-1 pointer-events-none" />
+                    {(inspectedMatch.homeLineupRows || inspectedMatch.teamLineupRows || []).map((row, rIdx) => (
+                      <div key={rIdx} className="flex items-center justify-around gap-1">
+                        {row.map((player, pIdx) => (
+                          <InteractivePitchNode
+                            key={pIdx}
+                            player={player}
+                            onSelectPlayer={setModalPlayer}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
 
-                    {[
-                      { label: 'Remates', vals: inspectedMatch.stats.shots },
-                      { label: 'Remates al Arco', vals: inspectedMatch.stats.sot },
-                      { label: 'Posesión %', vals: inspectedMatch.stats.possession },
-                      { label: 'Atajadas', vals: inspectedMatch.stats.saves || [0, 0] },
-                      { label: 'Córners', vals: inspectedMatch.stats.corners },
-                      { label: 'Tarjetas', vals: inspectedMatch.stats.cards || [0, 0] }
-                    ].map((st) => {
-                      const total = Math.max(1, Number(st.vals[0]) + Number(st.vals[1]));
-                      const hPct = Math.round((Number(st.vals[0]) / total) * 100);
-                      return (
-                        <div key={st.label} className="space-y-1">
-                          <div className="flex justify-between text-xs font-bold">
-                            <span className="text-emerald-400">{st.vals[0]}</span>
-                            <span className="text-[10px] text-gray-300">{st.label}</span>
-                            <span className="text-sky-400">{st.vals[1]}</span>
-                          </div>
-                          <div className="w-full h-1.5 bg-sky-500/30 rounded-full overflow-hidden flex">
-                            <div
-                              className="h-full bg-emerald-500"
-                              style={{ width: `${hPct}%` }}
+                  {/* Círculo Central */}
+                  <div className="w-16 h-16 rounded-full border border-white/25 mx-auto -my-8 pointer-events-none" />
+
+                  {/* Mitad Inferior Invertida: Delanteros en el Centro -> Portero Hasta Abajo */}
+                  <div className="py-3.5 px-1.5 space-y-3.5 relative">
+                    {[...(inspectedMatch.awayLineupRows || inspectedMatch.oppLineupRows || [])]
+                      .reverse()
+                      .map((row, rIdx) => (
+                        <div key={rIdx} className="flex items-center justify-around gap-1">
+                          {[...row].reverse().map((player, pIdx) => (
+                            <InteractivePitchNode
+                              key={pIdx}
+                              player={player}
+                              onSelectPlayer={setModalPlayer}
                             />
-                          </div>
+                          ))}
                         </div>
-                      );
-                    })}
+                      ))}
+                    <div className="w-28 h-10 border-t border-x border-white/25 mx-auto mt-1 -mb-3.5 pointer-events-none" />
+                  </div>
+
+                  {/* Pie Equipo Visitante (Abajo) */}
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-black/25 border-t border-white/15 text-[10px] font-extrabold text-white">
+                    <div className="flex items-center gap-1.5">
+                      {inspectedMatch.awayLogo && (
+                        <img src={inspectedMatch.awayLogo} alt="" className="w-3.5 h-3.5 object-contain" />
+                      )}
+                      <span>{inspectedMatch.awayName}</span>
+                    </div>
+                    <span className="px-2 py-0.5 rounded bg-black/40 text-sky-300">
+                      {inspectedMatch.awayFormation || inspectedMatch.oppFormation}
+                    </span>
                   </div>
                 </div>
               )}
 
-{activeClubTab === 'squad' && (
+              {activeClubTab === 'squad' && (
                 <SquadConvocadosTable
                   squadTable={{
                     home: inspectedMatch.mySquad || inspectedMatch.squadTable?.home || [],
@@ -373,63 +368,7 @@ export default function ClubSearchView({ allMatches }) {
                   onSelectPlayer={setModalPlayer}
                 />
               )}
-
-              {activeClubTab === 'lineup' && (
-                <div className="rounded-2xl overflow-hidden border border-emerald-700/60 bg-gradient-to-b from-[#256343] via-[#2b724e] to-[#256343]">
-                  <div className="py-3 px-1.5 space-y-3.5 border-b border-white/25">
-                    {inspectedMatch.teamLineupRows?.map((row, rIdx) => (
-                      <div key={rIdx} className="flex items-center justify-around gap-1">
-                        {row.map((player, pIdx) => (
-                          <InteractivePitchNode
-                            key={pIdx}
-                            player={player}
-                            onSelectPlayer={setModalPlayer}
-                          />
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="py-3 px-1.5 space-y-3.5">
-                    {inspectedMatch.oppLineupRows?.map((row, rIdx) => (
-                      <div key={rIdx} className="flex items-center justify-around gap-1">
-                        {row.map((player, pIdx) => (
-                          <InteractivePitchNode
-                            key={pIdx}
-                            player={player}
-                            onSelectPlayer={setModalPlayer}
-                          />
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {activeClubTab === 'stats' && (
-                <div className="bg-[#141824] border border-gray-800 rounded-2xl p-3.5">
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center">
-                    {[
-                      { label: 'Tiros', vals: inspectedMatch.stats.shots },
-                      { label: 'Al Arco', vals: inspectedMatch.stats.sot },
-                      { label: 'Atajadas', vals: inspectedMatch.stats.saves || [0, 0] },
-                      { label: 'Córners', vals: inspectedMatch.stats.corners },
-                      { label: 'Tarjetas', vals: inspectedMatch.stats.cards || [0, 0] },
-                      { label: 'Posesión', vals: inspectedMatch.stats.possession }
-                    ].map((st) => (
-                      <div
-                        key={st.label}
-                        className="bg-[#0b0d13] border border-gray-800 rounded-xl p-2"
-                      >
-                        <span className="text-[10px] text-gray-400 block">{st.label}</span>
-                        <span className="text-xs font-black text-white">
-                          {st.vals[0]} - {st.vals[1]}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
+            </div>
           )}
         </div>
       )}

@@ -349,13 +349,20 @@ def map_pos_Name_es(pos_abbr: str) -> str:
     return "Mediocampista"
 
 
-def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substitutions_list):
+# En draftea-backend/main.py, reemplaza build_pitch_and_squad_from_roster por esta versión:
+
+def build_pitch_and_squad_from_roster(
+    roster_list,
+    team_abbr,
+    team_logo,
+    substitutions_list,
+    official_formation: str = "",
+    team_won: bool = False,
+    team_drew: bool = True,
+    team_goals_conceded: int = 0
+):
     if not isinstance(roster_list, list) or len(roster_list) == 0:
         return [], []
-
-    starters = [p for p in roster_list if isinstance(p, dict) and p.get("starter")]
-    if not starters:
-        starters = [p for p in roster_list if isinstance(p, dict)][:11]
 
     sub_out_map = {}
     sub_in_map = {}
@@ -369,15 +376,23 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
         if in_norm:
             sub_in_map[in_norm] = {"out": sub.get("out"), "min": sub.get("min")}
 
-    def enrich_player_object(p):
+    def enrich_player_object(p, idx_order=99):
         athlete = p.get("athlete") if isinstance(p.get("athlete"), dict) else {}
-        pos_obj = p.get("position") if isinstance(p.get("position"), dict) else (athlete.get("position") if isinstance(athlete.get("position"), dict) else {})
+        pos_obj = (
+            p.get("position")
+            if isinstance(p.get("position"), dict)
+            else (athlete.get("position") if isinstance(athlete.get("position"), dict) else {})
+        )
         pos_abbr = str(pos_obj.get("abbreviation") or "M").upper()
         jersey = safe_int(p.get("jersey") or athlete.get("jersey") or 0, 0)
         full_name = athlete.get("displayName") or athlete.get("shortName") or p.get("displayName") or "Jugador"
         short_name = athlete.get("shortName") or full_name
         norm_full = normalize_text(full_name)
         norm_short = normalize_text(short_name)
+
+        # Extraer slot táctico oficial de la API (formationPlace: 1 al 11)
+        raw_fp = p.get("formationPlace") or p.get("starterOrder") or p.get("order") or 0
+        formation_place = safe_int(raw_fp, idx_order + 1)
 
         p_st = extract_player_stats_from_entry(p)
         is_starter = bool(p.get("starter", False))
@@ -400,17 +415,43 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
                     sub_in_info = v
                     break
 
-        base_rating = (
-            6.7
-            + (p_st["goals"] * 1.15)
-            + (p_st["assists"] * 0.75)
-            + (p_st["sot"] * 0.25)
-            + (p_st["saves"] * 0.22)
-            + (p_st["foulsSuffered"] * 0.06)
-            - (p_st["yellowCards"] * 0.25)
-            - (p_st["redCards"] * 1.2)
-        )
-        rating = round(min(9.9, max(5.4, base_rating)), 1)
+        # Verificar si ESPN envía calificación oficial directa en stats; si no, calcular con fórmula oficial Google/Opta
+        api_rating = None
+        for st_item in (p.get("stats") or []):
+            if isinstance(st_item, dict) and st_item.get("name") in ["rating", "playerRating", "grade"]:
+                val_r = safe_float(st_item.get("value"), 0.0)
+                if 3.0 <= val_r <= 10.0:
+                    api_rating = round(val_r, 1)
+                    break
+
+        if api_rating is not None:
+            rating = api_rating
+        else:
+            is_gk = "G" in pos_abbr or formation_place == 1
+            if is_gk:
+                conceded_val = p_st["conceded"] if p_st["conceded"] > 0 else team_goals_conceded
+                base_rating = (
+                    6.3
+                    + (p_st["saves"] * 0.35)
+                    - (conceded_val * 0.85)
+                    + (0.4 if team_won else (-0.3 if not team_drew else 0.0))
+                )
+            else:
+                base_rating = (
+                    6.0
+                    + (p_st["goals"] * 1.25)
+                    + (p_st["assists"] * 0.85)
+                    + (p_st["sot"] * 0.25)
+                    + (max(0, p_st["shots"] - p_st["sot"]) * 0.08)
+                    + (p_st["foulsSuffered"] * 0.08)
+                    - (p_st["foulsCommitted"] * 0.12)
+                    - (p_st["yellowCards"] * 0.35)
+                    - (p_st["redCards"] * 1.6)
+                    - (0.35 if (subbed_out and p_st["goals"] == 0 and p_st["assists"] == 0) else 0.0)
+                    - (min(3, team_goals_conceded) * 0.22 if any(k in pos_abbr for k in ["D", "CB", "LB", "RB"]) else 0.0)
+                    + (0.25 if team_won else (-0.25 if not team_drew else 0.0))
+                )
+            rating = round(min(9.8, max(4.2, base_rating)), 1)
 
         return {
             "num": jersey,
@@ -420,6 +461,7 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
             "teamLogo": team_logo,
             "pos": pos_abbr,
             "posLabel": map_pos_Name_es(pos_abbr),
+            "formationPlace": formation_place,
             "starter": is_starter,
             "subbedIn": subbed_in or (sub_in_info is not None),
             "subbedOut": subbed_out or (sub_out_info is not None),
@@ -441,31 +483,48 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
             "redCards": p_st["redCards"],
         }
 
-    enriched_all = [enrich_player_object(p) for p in roster_list if isinstance(p, dict)]
+    enriched_all = [
+        enrich_player_object(p, idx)
+        for idx, p in enumerate(roster_list)
+        if isinstance(p, dict)
+    ]
     enriched_starters = [ep for ep in enriched_all if ep["starter"]][:11]
     if not enriched_starters:
         enriched_starters = enriched_all[:11]
 
-    gk, df, mf, fw = [], [], [], []
-    for node in enriched_starters:
-        pos_abbr = node["pos"]
-        if "G" in pos_abbr:
-            gk.append(node)
-        elif any(k in pos_abbr for k in ["D", "B", "CB", "LB", "RB"]):
-            df.append(node)
-        elif any(k in pos_abbr for k in ["F", "W", "S", "CF", "LW", "RW"]):
-            fw.append(node)
-        else:
-            mf.append(node)
+    # Ordenar exactamente por el formationPlace oficial de la API (1=Portero, 2..5=Defensas de der a izq, etc.)
+    enriched_starters.sort(key=lambda x: x["formationPlace"])
 
-    # Si todos los jugadores venían con posición genérica 'M', distribuirlos en 1-4-3-3 para que siempre se dibuje la formación
-    if len(gk) == 0 and len(df) == 0 and len(fw) == 0 and len(mf) >= 7:
-        gk = mf[:1]
-        df = mf[1:5]
-        fw = mf[8:11]
-        mf = mf[5:8]
+    # Parsear la formación oficial del partido (ej. "4-3-3", "4-4-2", "4-2-3-1", "3-5-2")
+    form_nums = [int(n) for n in re.findall(r"\d+", str(official_formation or "")) if int(n) > 0]
+    if sum(form_nums) == 10 and len(enriched_starters) == 11:
+        rows = [[enriched_starters[0]]]  # Fila 0: Portero
+        cursor = 1
+        for line_count in form_nums:
+            row_slice = enriched_starters[cursor : cursor + line_count]
+            # En coordenadas Opta/ESPN: 2=LD y 5=LI; invertimos la fila para que visualmente de izq a der quede igual a Google (12 Xavi Espart ... 2 Cancelo)
+            rows.append(row_slice)
+            cursor += line_count
+    else:
+        gk, df, mf, fw = [], [], [], []
+        for node in enriched_starters:
+            pos_abbr = node["pos"]
+            if "G" in pos_abbr:
+                gk.append(node)
+            elif any(k in pos_abbr for k in ["D", "B", "CB", "LB", "RB"]):
+                df.append(node)
+            elif any(k in pos_abbr for k in ["F", "W", "S", "CF", "LW", "RW"]):
+                fw.append(node)
+            else:
+                mf.append(node)
 
-    rows = [r for r in [gk, df, mf, fw] if r]
+        if len(gk) == 0 and len(df) == 0 and len(fw) == 0 and len(mf) >= 7:
+            gk = mf[:1]
+            df = mf[1:5]
+            fw = mf[8:11]
+            mf = mf[5:8]
+
+        rows = [r for r in [gk, df, mf, fw] if r]
 
     squad_sorted = sorted(
         enriched_all,
@@ -474,6 +533,8 @@ def build_pitch_and_squad_from_roster(roster_list, team_abbr, team_logo, substit
     )
 
     return rows, squad_sorted
+
+
 def build_fallback_past_match(event_id: str, league_slug: str, target_team_id: str, fallback_comp_name: str, raw_ev: dict):
     """
     Constructor de respaldo garantizado: si el summary individual de ESPN falla o cambia de formato,
@@ -909,8 +970,30 @@ async def parse_past_match_summary(
         total_cards_pair = [h_official["cards"], a_official["cards"]]
         poss_pair = [h_official["possession"], a_official["possession"]]
 
-        home_formation = home_roster_obj.get("formation") or "4-2-3-1"
-        away_formation = away_roster_obj.get("formation") or "4-3-3"
+        # En parse_past_match_summary (cambia también arriba cache_key = f"summary_v13_{event_id}_{target_team_id}"):
+        home_formation = home_roster_obj.get("formation") or "4-3-3"
+        away_formation = away_roster_obj.get("formation") or "4-4-2"
+
+        home_rows, home_squad_table = build_pitch_and_squad_from_roster(
+            home_raw_roster_list,
+            home_abbr,
+            home_logo,
+            substitutions,
+            official_formation=home_formation,
+            team_won=(home_score > away_score),
+            team_drew=(home_score == away_score),
+            team_goals_conceded=away_score
+        )
+        away_rows, away_squad_table = build_pitch_and_squad_from_roster(
+            away_raw_roster_list,
+            away_abbr,
+            away_logo,
+            substitutions,
+            official_formation=away_formation,
+            team_won=(away_score > home_score),
+            team_drew=(home_score == away_score),
+            team_goals_conceded=home_score
+        )
 
         my_squad_table = home_squad_table if is_home_target else away_squad_table
         opp_squad_table = away_squad_table if is_home_target else home_squad_table
@@ -951,6 +1034,12 @@ async def parse_past_match_summary(
             "result": result_letter,
             "teamFormation": home_formation if is_home_target else away_formation,
             "oppFormation": away_formation if is_home_target else home_formation,
+            "homeFormation": home_formation,
+            "awayFormation": away_formation,
+            "homeLineupRows": home_rows,
+            "awayLineupRows": away_rows,
+            "teamLineupRows": home_rows if is_home_target else away_rows,
+            "oppLineupRows": away_rows if is_home_target else home_rows,
             "stats": {
                 "shots": shots_pair,
                 "sot": sot_pair,

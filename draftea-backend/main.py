@@ -1878,6 +1878,138 @@ async def fetch_espn_schedule_via_league_teams(
     )
 
 
+# En draftea-backend/main.py, reemplaza desde THESPORTSDB_LEAGUE_IDS hasta el final de fetch_all_leagues_cartelera:
+
+THESPORTSDB_LEAGUE_IDS = {
+    "MLS": "4346",
+    "J1_LEAGUE": "4633",
+}
+
+
+async def ensure_league_teams_registered(client: httpx.AsyncClient, league_slug: str, league_name: str):
+    """
+    Descarga el catálogo oficial de clubes de la liga en ESPN (/sports/soccer/{league_slug}/teams)
+    para tener siempre sus IDs reales de ESPN, escudos oficiales y abreviaturas.
+    """
+    cache_key = f"teams_loaded_{league_slug}"
+    if cache_key in DEEP_CACHE:
+        return DEEP_CACHE[cache_key]
+
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams?limit=100"
+    club_list = []
+    try:
+        resp = await client.get(url, headers=HEADERS)
+        if resp.status_code == 200:
+            data = resp.json()
+            for sp in (data.get("sports") or []):
+                for lg in (sp.get("leagues") or []):
+                    for tm_wrap in (lg.get("teams") or []):
+                        tm = tm_wrap.get("team") or {}
+                        t_id = str(tm.get("id") or "")
+                        if t_id:
+                            register_team_in_directory(tm, league_slug, league_name)
+                            club_list.append(tm)
+    except Exception:
+        pass
+
+    DEEP_CACHE[cache_key] = club_list
+    return club_list
+
+
+def resolve_espn_team_info(team_name: str, league_slug: str, fallback_id: str, fallback_logo: str):
+    """
+    Busca en el directorio oficial de ESPN el club por nombre para asignarle su teamApiId real de ESPN
+    y su escudo oficial, asegurando que las estadísticas profundas y Últimos 5 siempre carguen de ESPN.
+    """
+    target_norm = normalize_text(team_name)
+    if not target_norm:
+        return fallback_id, team_name[:3].upper(), fallback_logo
+
+    # 1. Coincidencia en la misma liga
+    for t_id, info in TEAMS_DIRECTORY.items():
+        if info.get("leagueSlug") == league_slug:
+            c_norm = normalize_text(info.get("name", ""))
+            if target_norm in c_norm or c_norm in target_norm:
+                return t_id, info.get("short") or team_name[:3].upper(), info.get("logo") or fallback_logo
+
+    # 2. Coincidencia por palabra clave (>= 4 letras) en la misma liga
+    tokens = [w for w in target_norm.split() if len(w) >= 4 and w not in ["club", "united", "city", "real", "sporting"]]
+    for t_id, info in TEAMS_DIRECTORY.items():
+        if info.get("leagueSlug") == league_slug:
+            c_norm = normalize_text(info.get("name", ""))
+            if any(tok in c_norm for tok in tokens):
+                return t_id, info.get("short") or team_name[:3].upper(), info.get("logo") or fallback_logo
+
+    return fallback_id, team_name[:3].upper(), fallback_logo
+
+
+async def fetch_espn_schedule_via_league_teams(
+    client: httpx.AsyncClient,
+    league_id: str,
+    league_slug: str,
+    league_info: dict,
+    today_mx_str: str,
+    now_utc: datetime
+):
+    """
+    Extrae los próximos partidos oficiales directamente de los clubes de ESPN
+    incluyendo Temporada Regular, Playoffs (seasontype=3) y rondas finales.
+    """
+    clubs = await ensure_league_teams_registered(client, league_slug, league_info["name"])
+    team_ids = [str(c.get("id")) for c in clubs if c.get("id")]
+
+    if not team_ids:
+        lg_ranks = STANDINGS_BY_LEAGUE.get(league_slug, {}).get("ranks", {})
+        for k in lg_ranks.keys():
+            if k.startswith("id:"):
+                tid = k.replace("id:", "").strip()
+                if tid and tid not in team_ids:
+                    team_ids.append(tid)
+
+    if not team_ids:
+        return []
+
+    sub_sem = asyncio.Semaphore(8)
+
+    async def get_team_upcoming_events(tid_str: str):
+        # Consultar tanto schedule normal como postemporada/playoffs (seasontype=3)
+        urls = [
+            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{tid_str}/schedule",
+            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{tid_str}/schedule?seasontype=3",
+        ]
+        found_evs = []
+        async with sub_sem:
+            for u in urls:
+                try:
+                    r = await client.get(u, headers=HEADERS)
+                    if r.status_code == 200:
+                        d = r.json()
+                        found_evs.extend(d.get("events") or [])
+                except Exception:
+                    continue
+        return found_evs
+
+    batches = await asyncio.gather(*(get_team_upcoming_events(tid) for tid in team_ids[:20]))
+    raw_events_map = {}
+    for ev_list in batches:
+        for ev in ev_list:
+            if isinstance(ev, dict) and ev.get("id"):
+                raw_events_map[str(ev.get("id"))] = ev
+
+    if not raw_events_map:
+        return []
+
+    return parse_espn_scoreboard_events(
+        list(raw_events_map.values()),
+        league_id,
+        league_slug,
+        league_info,
+        today_mx_str,
+        now_utc,
+        allow_extended_window=True
+    )
+
+
 async def fetch_thesportsdb_fallback_matches(
     client: httpx.AsyncClient,
     league_id: str,
@@ -1885,18 +2017,23 @@ async def fetch_thesportsdb_fallback_matches(
     today_mx_str: str
 ):
     """
-    Respaldo secundario oficial (TheSportsDB API con llave pública '1' y endpoint eventsseason).
+    Motor secundario oficial (TheSportsDB API v1 con clave pública '3') que además
+    vincula cada club con su teamApiId real de ESPN para que las estadísticas profundas funcionen al 100%.
     """
     tsdb_id = THESPORTSDB_LEAGUE_IDS.get(league_id)
     if not tsdb_id:
         return []
 
+    await ensure_league_teams_registered(client, league_info["slug"], league_info["name"])
+
     current_year = today_mx_str[:4]
     urls = [
-        f"https://www.thesportsdb.com/api/v1/json/1/eventsseason.php?id={tsdb_id}&s={current_year}",
-        f"https://www.thesportsdb.com/api/v1/json/1/eventsnextleague.php?id={tsdb_id}",
-        f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s={current_year}"
+        f"https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id={tsdb_id}",
+        f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s={current_year}",
+        f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s=2025",
     ]
+
+    yesterday_str = (datetime.now(timezone.utc).astimezone(MEXICO_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
 
     for url in urls:
         try:
@@ -1912,25 +2049,38 @@ async def fetch_thesportsdb_fallback_matches(
                 ev_id = str(ev.get("idEvent") or "")
                 date_ev = str(ev.get("dateEvent") or "")
                 status_str = str(ev.get("strStatus") or "").upper()
-                if not ev_id or date_ev < today_mx_str:
+                if not ev_id or date_ev < yesterday_str:
                     continue
-                if "FT" in status_str or "FINISHED" in status_str or "AOT" in status_str:
+                if any(k in status_str for k in ["FT", "FINISHED", "AOT", "POSTPONED"]):
+                    continue
+                # Si ya tiene marcador final registrado en un evento viejo, omitirlo
+                if ev.get("intHomeScore") is not None and ev.get("intAwayScore") is not None and date_ev < today_mx_str:
                     continue
 
                 time_ev = str(ev.get("strTime") or "12:00:00")[:5]
                 iso_str = f"{date_ev}T{time_ev}:00Z"
                 date_mx, time_mx = convert_utc_to_mexico(iso_str)
                 if date_mx < today_mx_str:
-                    continue
+                    # En caso de huso horario japonés, conservar si la fecha original del evento es >= hoy
+                    if date_ev >= today_mx_str:
+                        date_mx = date_ev
+                    else:
+                        continue
 
                 home_name = ev.get("strHomeTeam") or "Local"
                 away_name = ev.get("strAwayTeam") or "Visitante"
-                home_id_str = str(ev.get("idHomeTeam") or home_name[:3].upper())
-                away_id_str = str(ev.get("idAwayTeam") or away_name[:3].upper())
-                home_abbr = home_name[:3].upper()
-                away_abbr = away_name[:3].upper()
-                home_logo = ev.get("strHomeTeamBadge") or ""
-                away_logo = ev.get("strAwayTeamBadge") or ""
+                raw_h_id = str(ev.get("idHomeTeam") or home_name[:3].upper())
+                raw_a_id = str(ev.get("idAwayTeam") or away_name[:3].upper())
+                raw_h_logo = ev.get("strHomeTeamBadge") or ""
+                raw_a_logo = ev.get("strAwayTeamBadge") or ""
+
+                # Vincular con el ID y escudo oficial de ESPN para que Estadísticas y Últimos 5 funcionen
+                home_id_str, home_abbr, home_logo = resolve_espn_team_info(
+                    home_name, league_info["slug"], raw_h_id, raw_h_logo
+                )
+                away_id_str, away_abbr, away_logo = resolve_espn_team_info(
+                    away_name, league_info["slug"], raw_a_id, raw_a_logo
+                )
 
                 out.append({
                     "id": ev_id,
@@ -1979,7 +2129,7 @@ async def fetch_thesportsdb_fallback_matches(
 
             if len(out) > 0:
                 out.sort(key=lambda x: (x["date"], x["time"]))
-                return out[:16]
+                return out[:18]
         except Exception:
             continue
 
@@ -1997,7 +2147,7 @@ def parse_espn_scoreboard_events(
 ):
     parsed = []
     max_future_date = (
-        (now_utc.astimezone(MEXICO_TZ) + timedelta(days=14 if allow_extended_window else 8)).strftime("%Y-%m-%d")
+        (now_utc.astimezone(MEXICO_TZ) + timedelta(days=21 if allow_extended_window else 9)).strftime("%Y-%m-%d")
     )
 
     for ev in (events or []):
@@ -2017,7 +2167,7 @@ def parse_espn_scoreboard_events(
             continue
 
         kickoff_utc = parse_kickoff_utc(ev.get("date") or comp.get("date") or "")
-        if state == "pre" and kickoff_utc and kickoff_utc <= (now_utc - timedelta(hours=3)):
+        if state == "pre" and kickoff_utc and kickoff_utc <= (now_utc - timedelta(hours=4)):
             continue
 
         date_mx, time_mx = convert_utc_to_mexico(ev.get("date") or comp.get("date") or "")
@@ -2147,7 +2297,6 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
         return []
 
     primary_slug = league_info["slug"]
-    # Para Japón y MLS incluimos también sus slugs de Copa/Playoffs si se pide DEFAULT
     slugs_to_query = [primary_slug]
     if date_yyyymmdd == "DEFAULT":
         if league_id == "J1_LEAGUE":
@@ -2158,30 +2307,45 @@ async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient
     out_events = []
     async with sem:
         for s_slug in slugs_to_query:
+            urls_to_check = []
             if date_yyyymmdd == "DEFAULT":
-                url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard"
-            else:
-                url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?dates={date_yyyymmdd}"
-            try:
-                resp = await client.get(url, headers=HEADERS)
-                if resp.status_code != 200:
-                    continue
-                events = resp.json().get("events") or []
-                now_utc = datetime.now(timezone.utc)
-                today_mx_str = now_utc.astimezone(MEXICO_TZ).strftime("%Y-%m-%d")
-                out_events.extend(
-                    parse_espn_scoreboard_events(
-                        events,
-                        league_id,
-                        primary_slug,
-                        league_info,
-                        today_mx_str,
-                        now_utc,
-                        allow_extended_window=(league_id in ["MLS", "J1_LEAGUE"])
+                urls_to_check.append(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard")
+                if league_id in ["MLS", "J1_LEAGUE"]:
+                    # Consultar también Playoffs (seasontype=3) y ventana de 14 días sin parámetro limit
+                    start_w = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+                    end_w = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y%m%d")
+                    urls_to_check.append(
+                        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?dates={start_w}-{end_w}"
                     )
+                    urls_to_check.append(
+                        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?seasontype=3"
+                    )
+            else:
+                urls_to_check.append(
+                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?dates={date_yyyymmdd}"
                 )
-            except Exception:
-                continue
+
+            for url in urls_to_check:
+                try:
+                    resp = await client.get(url, headers=HEADERS)
+                    if resp.status_code != 200:
+                        continue
+                    events = resp.json().get("events") or []
+                    now_utc = datetime.now(timezone.utc)
+                    today_mx_str = now_utc.astimezone(MEXICO_TZ).strftime("%Y-%m-%d")
+                    out_events.extend(
+                        parse_espn_scoreboard_events(
+                            events,
+                            league_id,
+                            primary_slug,
+                            league_info,
+                            today_mx_str,
+                            now_utc,
+                            allow_extended_window=(league_id in ["MLS", "J1_LEAGUE"])
+                        )
+                    )
+                except Exception:
+                    continue
     return out_events
 
 
@@ -2195,8 +2359,10 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
         not force_refresh
         and CARTELERA_CACHE["timestamp"]
         and CARTELERA_CACHE["date_key"] == today_mx_str
-        and (now_utc - CARTELERA_CACHE["timestamp"]).total_seconds() < 60
+        and (now_utc - CARTELERA_CACHE["timestamp"]).total_seconds() < 45
         and len(CARTELERA_CACHE["matches"]) > 0
+        and any(m["leagueId"] == "MLS" for m in CARTELERA_CACHE["matches"])
+        and any(m["leagueId"] == "J1_LEAGUE" for m in CARTELERA_CACHE["matches"])
     ):
         valid_cached = [
             m for m in CARTELERA_CACHE["matches"]
@@ -2216,12 +2382,10 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
 
     sem = asyncio.Semaphore(14)
     async with httpx.AsyncClient(timeout=18.0, follow_redirects=True) as client:
-        # 1. Pre-cargar las tablas de posiciones oficiales de todas las ligas
         await asyncio.gather(
             *(ensure_league_standings_cached(client, info["slug"]) for info in LIVE_LEAGUES_MAP.values())
         )
 
-        # 2. Descargar partidos día por día de todas las ligas
         tasks = [
             fetch_league_on_date(sem, client, league_id, d_str)
             for d_str in target_dates
@@ -2234,10 +2398,7 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
             for match in batch:
                 unique_map[match["id"]] = match
 
-        # 3. DOBLE MOTOR PARA MLS Y J1 LEAGUE JAPÓN:
-        # Si el scoreboard general de ESPN no listó los partidos de MLS o J1 League,
-        # los extrae directamente del calendario oficial de los equipos de esa liga en ESPN
-        # y, en última instancia, de TheSportsDB (llave 1).
+        # Verificar MLS y J1_LEAGUE con el extractor de calendarios de clubes ESPN y TheSportsDB (key=3)
         for special_lg in ["MLS", "J1_LEAGUE"]:
             has_lg_matches = any(m["leagueId"] == special_lg for m in unique_map.values())
             if not has_lg_matches and special_lg in LIVE_LEAGUES_MAP:

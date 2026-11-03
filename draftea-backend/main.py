@@ -11,7 +11,7 @@ import httpx
 
 app = FastAPI(
     title="Draftea Beats AI - Motor Verificado ESPN Multi-Competencia",
-    version="8.5.0"
+    version="9.0.0"
 )
 
 app.add_middleware(
@@ -33,6 +33,7 @@ HEADERS = {
 LIVE_LEAGUES_MAP = {
     "LIGA_MX": {"slug": "mex.1", "name": "Liga BBVA MX", "profile": "Equilibrada"},
     "LIGA_MX_FEM": {"slug": "mex.w.1", "name": "Liga MX Femenil", "profile": "Alta en Goles"},
+    "MLS": {"slug": "usa.1", "name": "MLS", "profile": "Ofensiva • Alto Ritmo y Goles"},
     "LALIGA": {"slug": "esp.1", "name": "LaLiga EA Sports", "profile": "Táctica"},
     "COPA_DEL_REY": {"slug": "esp.copa_del_rey", "name": "Copa del Rey", "profile": "Eliminación Directa"},
     "SUPERCOPA_ESP": {"slug": "esp.super_cup", "name": "Supercopa de España", "profile": "Torneo Élite"},
@@ -43,6 +44,7 @@ LIVE_LEAGUES_MAP = {
     "DFB_POKAL": {"slug": "ger.dfb_pokal", "name": "DFB Pokal", "profile": "Copa Alemana"},
     "LIGUE_1": {"slug": "fra.1", "name": "Ligue 1 McDonald's", "profile": "Física"},
     "SAUDI_PRO": {"slug": "ksa.1", "name": "Saudi Pro League", "profile": "Ofensiva • Estrellas Internacionales"},
+    "J1_LEAGUE": {"slug": "jpn.1", "name": "J1 League Japón", "profile": "Dinámica • Alta en Córners y Goles"},
     "UCL": {"slug": "uefa.champions", "name": "UEFA Champions League", "profile": "Élite Europea"},
     "UWCL": {"slug": "uefa.wchampions", "name": "UEFA Champions Femenil", "profile": "Alta en Goles y Tiros"},
     "UEL": {"slug": "uefa.europa", "name": "UEFA Europa League", "profile": "Competitiva"},
@@ -64,6 +66,10 @@ SLUG_TO_LEAGUE_NAME.update({
     "ita.coppa_italia": "Coppa Italia",
     "fra.coupe_de_france": "Coupe de France",
     "concacaf.champions": "CONCACAF Champions Cup",
+    "concacaf.leagues.cup": "Leagues Cup",
+    "usa.open": "U.S. Open Cup",
+    "afc.champions": "AFC Champions League Elite",
+    "jpn.world_challenge": "J.League Cup",
 })
 
 NAME_TO_SLUG = {v["name"].lower(): v["slug"] for v in LIVE_LEAGUES_MAP.values()}
@@ -71,9 +77,6 @@ NAME_TO_SLUG = {v["name"].lower(): v["slug"] for v in LIVE_LEAGUES_MAP.values()}
 DEEP_CACHE = {}
 CARTELERA_CACHE = {"timestamp": None, "date_key": None, "matches": []}
 TEAMS_DIRECTORY = {}
-
-# Diccionario de tablas de posiciones separado estrictamente por competencia (league_slug)
-# Estructura: STANDINGS_BY_LEAGUE[league_slug] = {"timestamp": datetime, "ranks": {team_id_or_name: rank_int}}
 STANDINGS_BY_LEAGUE = {}
 
 
@@ -85,15 +88,21 @@ def normalize_text(text: str) -> str:
 
 
 def register_team_in_directory(team_obj, league_slug: str, league_name: str):
-    t_id = str(team_obj.get("id", ""))
+    if not isinstance(team_obj, dict):
+        return
+    t_id = str(team_obj.get("id") or "")
     t_name = team_obj.get("displayName") or team_obj.get("name") or ""
     if not t_id or not t_name:
         return
+    logos = team_obj.get("logos")
+    logo_url = team_obj.get("logo") or (
+        logos[0].get("href", "") if isinstance(logos, list) and len(logos) > 0 and isinstance(logos[0], dict) else ""
+    )
     TEAMS_DIRECTORY[t_id] = {
         "teamId": t_id,
         "name": t_name,
         "short": team_obj.get("abbreviation") or t_name[:3].upper(),
-        "logo": team_obj.get("logo") or (team_obj.get("logos", [{}])[0].get("href", "") if team_obj.get("logos") else ""),
+        "logo": logo_url,
         "leagueSlug": league_slug,
         "leagueName": league_name,
         "searchKey": normalize_text(f"{t_name} {team_obj.get('abbreviation', '')}")
@@ -115,10 +124,6 @@ def save_team_rank_in_league(league_slug: str, team_id_str: str, team_name_str: 
 
 
 def get_verified_rank(league_slug: str, comp_obj=None, team_id_str: str = "", team_name_str: str = ""):
-    """
-    Devuelve la posición oficial del equipo EXCLUSIVAMENTE en la competencia solicitada (`league_slug`).
-    Prioriza la tabla oficial (`STANDINGS_BY_LEAGUE[league_slug]`) para que LaLiga y Champions jamás se mezclen.
-    """
     lg_ranks = STANDINGS_BY_LEAGUE.get(league_slug, {}).get("ranks", {})
     if team_id_str and f"id:{team_id_str}" in lg_ranks:
         return lg_ranks[f"id:{team_id_str}"]
@@ -127,9 +132,8 @@ def get_verified_rank(league_slug: str, comp_obj=None, team_id_str: str = "", te
     if norm_n and f"name:{norm_n}" in lg_ranks:
         return lg_ranks[f"name:{norm_n}"]
 
-    # Respaldo: si el objeto competitor de ese evento específico trae curatedRank válido
     if isinstance(comp_obj, dict):
-        c_rank = comp_obj.get("curatedRank", {}).get("current") or comp_obj.get("rank")
+        c_rank = (comp_obj.get("curatedRank") or {}).get("current") or comp_obj.get("rank")
         if c_rank and str(c_rank).isdigit() and 1 <= int(c_rank) <= 45:
             r_int = int(c_rank)
             save_team_rank_in_league(league_slug, team_id_str, team_name_str, r_int)
@@ -139,28 +143,27 @@ def get_verified_rank(league_slug: str, comp_obj=None, team_id_str: str = "", te
 
 
 async def ensure_league_standings_cached(client: httpx.AsyncClient, league_slug: str):
-    """
-    Descarga la tabla oficial de posiciones de `league_slug` desde ESPN.
-    Se actualiza automáticamente cada 10 minutos para reflejar los cambios en vivo tras cada partido.
-    """
     if not league_slug or league_slug == "all":
         return
 
     now_utc = datetime.now(timezone.utc)
     existing = STANDINGS_BY_LEAGUE.get(league_slug)
-    if existing and (now_utc - existing["timestamp"]).total_seconds() < 600 and existing["ranks"]:
+    if existing and (now_utc - existing["timestamp"]).total_seconds() < 900 and existing["ranks"]:
         return
 
     url = f"https://site.api.espn.com/apis/v2/sports/soccer/{league_slug}/standings"
     try:
-        resp = await client.get(url, headers=HEADERS)
+        resp = await client.get(url, headers=HEADERS, timeout=6.0)
         if resp.status_code != 200:
             return
         data = resp.json()
-        children = data.get("children", [])
-        entries = list(data.get("standings", {}).get("entries", []))
+        if not isinstance(data, dict):
+            return
+        children = data.get("children") or []
+        entries = list((data.get("standings") or {}).get("entries") or [])
         for ch in children:
-            entries.extend(ch.get("standings", {}).get("entries", []))
+            if isinstance(ch, dict):
+                entries.extend((ch.get("standings") or {}).get("entries") or [])
 
         if not entries:
             return
@@ -168,18 +171,19 @@ async def ensure_league_standings_cached(client: httpx.AsyncClient, league_slug:
         STANDINGS_BY_LEAGUE[league_slug] = {"timestamp": now_utc, "ranks": {}}
 
         for ent in entries:
-            t_obj = ent.get("team", {})
-            t_id = str(t_obj.get("id", ""))
+            if not isinstance(ent, dict):
+                continue
+            t_obj = ent.get("team") or {}
+            t_id = str(t_obj.get("id") or "")
             t_name = t_obj.get("displayName") or t_obj.get("name") or ""
 
-            # Solo tomar el estadístico oficial 'rank' (o note.rank), NUNCA inventar posición por índice si no existe
             official_rank = None
-            for st in ent.get("stats", []):
-                if st.get("name") == "rank" and st.get("value") is not None:
+            for st in (ent.get("stats") or []):
+                if isinstance(st, dict) and st.get("name") == "rank" and st.get("value") is not None:
                     official_rank = safe_int(st.get("value"), 0)
                     break
-            if not official_rank and ent.get("note", {}).get("rank"):
-                official_rank = safe_int(ent.get("note", {}).get("rank"), 0)
+            if not official_rank and isinstance(ent.get("note"), dict) and ent["note"].get("rank"):
+                official_rank = safe_int(ent["note"].get("rank"), 0)
 
             if official_rank and 1 <= official_rank <= 64:
                 save_team_rank_in_league(league_slug, t_id, t_name, official_rank)
@@ -189,7 +193,7 @@ async def ensure_league_standings_cached(client: httpx.AsyncClient, league_slug:
 
 def parse_kickoff_utc(iso_date_str: str):
     try:
-        clean_str = iso_date_str.replace("Z", "+00:00")
+        clean_str = str(iso_date_str).replace("Z", "+00:00")
         return datetime.fromisoformat(clean_str)
     except Exception:
         return None
@@ -198,7 +202,7 @@ def parse_kickoff_utc(iso_date_str: str):
 def convert_utc_to_mexico(iso_date_str: str):
     dt_utc = parse_kickoff_utc(iso_date_str)
     if not dt_utc:
-        return iso_date_str[:10], "13:00 (1:00 PM)"
+        return str(iso_date_str)[:10], "13:00 (1:00 PM)"
     dt_mx = dt_utc.astimezone(MEXICO_TZ)
     date_mx = dt_mx.strftime("%Y-%m-%d")
     hour_12 = dt_mx.strftime("%I:%M %p").lstrip("0")
@@ -236,6 +240,8 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
     stats_list = box_team_obj.get("statistics", []) if isinstance(box_team_obj, dict) else []
     stat_map = {}
     for st in stats_list:
+        if not isinstance(st, dict):
+            continue
         name = st.get("name", "")
         disp = str(st.get("displayValue", "")).strip()
         val = st.get("value")
@@ -297,7 +303,9 @@ def extract_official_team_stats_from_boxscore(box_team_obj):
 
 def extract_player_stats_from_entry(p_entry):
     st_map = {}
-    for s in p_entry.get("stats", []):
+    for s in (p_entry.get("stats") or []):
+        if not isinstance(s, dict):
+            continue
         s_name = s.get("name", "")
         s_val = s.get("value")
         if s_val is not None:
@@ -349,8 +357,6 @@ def map_pos_Name_es(pos_abbr: str) -> str:
     return "Mediocampista"
 
 
-# En draftea-backend/main.py, reemplaza build_pitch_and_squad_from_roster por esta versión:
-
 def build_pitch_and_squad_from_roster(
     roster_list,
     team_abbr,
@@ -390,7 +396,6 @@ def build_pitch_and_squad_from_roster(
         norm_full = normalize_text(full_name)
         norm_short = normalize_text(short_name)
 
-        # Extraer slot táctico oficial de la API (formationPlace: 1 al 11)
         raw_fp = p.get("formationPlace") or p.get("starterOrder") or p.get("order") or 0
         formation_place = safe_int(raw_fp, idx_order + 1)
 
@@ -415,7 +420,6 @@ def build_pitch_and_squad_from_roster(
                     sub_in_info = v
                     break
 
-        # Verificar si ESPN envía calificación oficial directa en stats; si no, calcular con fórmula oficial Google/Opta
         api_rating = None
         for st_item in (p.get("stats") or []):
             if isinstance(st_item, dict) and st_item.get("name") in ["rating", "playerRating", "grade"]:
@@ -492,17 +496,14 @@ def build_pitch_and_squad_from_roster(
     if not enriched_starters:
         enriched_starters = enriched_all[:11]
 
-    # Ordenar exactamente por el formationPlace oficial de la API (1=Portero, 2..5=Defensas de der a izq, etc.)
     enriched_starters.sort(key=lambda x: x["formationPlace"])
 
-    # Parsear la formación oficial del partido (ej. "4-3-3", "4-4-2", "4-2-3-1", "3-5-2")
     form_nums = [int(n) for n in re.findall(r"\d+", str(official_formation or "")) if int(n) > 0]
     if sum(form_nums) == 10 and len(enriched_starters) == 11:
-        rows = [[enriched_starters[0]]]  # Fila 0: Portero
+        rows = [[enriched_starters[0]]]
         cursor = 1
         for line_count in form_nums:
             row_slice = enriched_starters[cursor : cursor + line_count]
-            # En coordenadas Opta/ESPN: 2=LD y 5=LI; invertimos la fila para que visualmente de izq a der quede igual a Google (12 Xavi Espart ... 2 Cancelo)
             rows.append(row_slice)
             cursor += line_count
     else:
@@ -536,10 +537,6 @@ def build_pitch_and_squad_from_roster(
 
 
 def build_fallback_past_match(event_id: str, league_slug: str, target_team_id: str, fallback_comp_name: str, raw_ev: dict):
-    """
-    Constructor de respaldo garantizado: si el summary individual de ESPN falla o cambia de formato,
-    construye el partido pasado con los datos reales que ya vienen en el schedule para que NUNCA salga vacío.
-    """
     try:
         comp = (raw_ev.get("competitions") or [{}])[0]
         competitors = comp.get("competitors") or []
@@ -646,11 +643,10 @@ async def parse_past_match_summary(
     fallback_comp_name: str = "",
     schedule_event_fallback: dict = None
 ):
-    cache_key = f"summary_v12_{event_id}_{target_team_id}"
+    cache_key = f"summary_v14_{event_id}_{target_team_id}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
 
-    # Deducir el slug real del torneo si el nombre indica Champions, Europa League, Copa del Rey, etc.
     comp_lower = (fallback_comp_name or "").lower()
     inferred_slug = league_slug
     if "champions" in comp_lower and "wom" not in comp_lower and "fem" not in comp_lower:
@@ -669,21 +665,7 @@ async def parse_past_match_summary(
         inferred_slug = "conmebol.libertadores"
 
     slugs_to_try = []
-    for s in [
-        inferred_slug,
-        league_slug,
-        "all",
-        "uefa.champions",
-        "esp.1",
-        "eng.1",
-        "ita.1",
-        "ger.1",
-        "fra.1",
-        "mex.1",
-        "usa.1",
-        "jpn.1",
-        "ksa.1"
-    ]:
+    for s in [inferred_slug, league_slug, "all", "uefa.champions", "esp.1", "eng.1", "ita.1", "ger.1", "fra.1", "mex.1", "usa.1", "jpn.1", "ksa.1"]:
         if s and s not in slugs_to_try:
             slugs_to_try.append(s)
 
@@ -691,12 +673,11 @@ async def parse_past_match_summary(
     for s_try in slugs_to_try[:4]:
         url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_try}/summary?event={event_id}"
         try:
-            resp = await client.get(url, headers=HEADERS)
+            resp = await client.get(url, headers=HEADERS, timeout=10.0)
             if resp.status_code == 200:
                 cand = resp.json()
                 if isinstance(cand, dict) and cand.get("header"):
                     data = cand
-                    # Si ya trae rosters con jugadores, nos quedamos con este inmediatamente
                     if cand.get("rosters") and len(cand.get("rosters")) >= 2:
                         break
         except Exception:
@@ -704,7 +685,10 @@ async def parse_past_match_summary(
 
     if not data:
         if schedule_event_fallback:
-            return build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+            fb = build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+            if fb:
+                DEEP_CACHE[cache_key] = fb
+            return fb
         return None
 
     try:
@@ -714,7 +698,10 @@ async def parse_past_match_summary(
         competitors = header_comp.get("competitors") if isinstance(header_comp.get("competitors"), list) else []
         if len(competitors) < 2:
             if schedule_event_fallback:
-                return build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+                fb = build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+                if fb:
+                    DEEP_CACHE[cache_key] = fb
+                return fb
             return None
 
         home_c = next((c for c in competitors if isinstance(c, dict) and c.get("homeAway") == "home"), competitors[0])
@@ -809,7 +796,6 @@ async def parse_past_match_summary(
         date_mx, _ = convert_utc_to_mexico(header_comp.get("date") or "")
         short_score_label = f"{home_abbr} {home_score}-{away_score} {away_abbr}"
 
-        # Extraer rosters de forma segura
         rosters = data.get("rosters") if isinstance(data.get("rosters"), list) else []
         home_roster_obj, away_roster_obj = {}, {}
         for r_obj in rosters:
@@ -903,11 +889,28 @@ async def parse_past_match_summary(
         h_official = extract_official_team_stats_from_boxscore(home_box_obj)
         a_official = extract_official_team_stats_from_boxscore(away_box_obj)
 
+        home_formation = home_roster_obj.get("formation") or "4-3-3"
+        away_formation = away_roster_obj.get("formation") or "4-4-2"
+
         home_rows, home_squad_table = build_pitch_and_squad_from_roster(
-            home_raw_roster_list, home_abbr, home_logo, substitutions
+            home_raw_roster_list,
+            home_abbr,
+            home_logo,
+            substitutions,
+            official_formation=home_formation,
+            team_won=(home_score > away_score),
+            team_drew=(home_score == away_score),
+            team_goals_conceded=away_score
         )
         away_rows, away_squad_table = build_pitch_and_squad_from_roster(
-            away_raw_roster_list, away_abbr, away_logo, substitutions
+            away_raw_roster_list,
+            away_abbr,
+            away_logo,
+            substitutions,
+            official_formation=away_formation,
+            team_won=(away_score > home_score),
+            team_drew=(home_score == away_score),
+            team_goals_conceded=home_score
         )
 
         player_perf, gk_perf = [], []
@@ -984,31 +987,6 @@ async def parse_past_match_summary(
         total_cards_pair = [h_official["cards"], a_official["cards"]]
         poss_pair = [h_official["possession"], a_official["possession"]]
 
-        # En parse_past_match_summary (cambia también arriba cache_key = f"summary_v13_{event_id}_{target_team_id}"):
-        home_formation = home_roster_obj.get("formation") or "4-3-3"
-        away_formation = away_roster_obj.get("formation") or "4-4-2"
-
-        home_rows, home_squad_table = build_pitch_and_squad_from_roster(
-            home_raw_roster_list,
-            home_abbr,
-            home_logo,
-            substitutions,
-            official_formation=home_formation,
-            team_won=(home_score > away_score),
-            team_drew=(home_score == away_score),
-            team_goals_conceded=away_score
-        )
-        away_rows, away_squad_table = build_pitch_and_squad_from_roster(
-            away_raw_roster_list,
-            away_abbr,
-            away_logo,
-            substitutions,
-            official_formation=away_formation,
-            team_won=(away_score > home_score),
-            team_drew=(home_score == away_score),
-            team_goals_conceded=home_score
-        )
-
         my_squad_table = home_squad_table if is_home_target else away_squad_table
         opp_squad_table = away_squad_table if is_home_target else home_squad_table
 
@@ -1048,12 +1026,6 @@ async def parse_past_match_summary(
             "result": result_letter,
             "teamFormation": home_formation if is_home_target else away_formation,
             "oppFormation": away_formation if is_home_target else home_formation,
-            "homeFormation": home_formation,
-            "awayFormation": away_formation,
-            "homeLineupRows": home_rows,
-            "awayLineupRows": away_rows,
-            "teamLineupRows": home_rows if is_home_target else away_rows,
-            "oppLineupRows": away_rows if is_home_target else home_rows,
             "stats": {
                 "shots": shots_pair,
                 "sot": sot_pair,
@@ -1064,6 +1036,10 @@ async def parse_past_match_summary(
             },
             "scorers": scorers,
             "cards": cards,
+            "homeFormation": home_formation,
+            "awayFormation": away_formation,
+            "homeLineupRows": home_rows,
+            "awayLineupRows": away_rows,
             "teamLineupRows": home_rows if is_home_target else away_rows,
             "oppLineupRows": away_rows if is_home_target else home_rows,
             "mySquad": my_squad_table,
@@ -1094,15 +1070,14 @@ async def parse_past_match_summary(
         return parsed_obj
     except Exception:
         if schedule_event_fallback:
-            return build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+            fb = build_fallback_past_match(event_id, inferred_slug, target_team_id, fallback_comp_name, schedule_event_fallback)
+            if fb:
+                DEEP_CACHE[cache_key] = fb
+            return fb
         return None
 
 
 async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id: str):
-    """
-    Descarga los últimos 5 partidos jugados del club combinando su liga doméstica + su torneo continental/copa
-    (máximo 3 llamadas ligeras de calendario) y garantiza el respaldo de cada partido para que NUNCA quede vacío.
-    """
     if not team_id:
         return []
 
@@ -1120,9 +1095,9 @@ async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id
     elif base_domestic in ["arg.1", "bra.1", "col.1"]:
         candidate_slugs.append("conmebol.libertadores")
     elif base_domestic in ["mex.1", "usa.1"]:
-        candidate_slugs.extend(["concacaf.champions", "concacaf.leagues.cup"])
+        candidate_slugs.extend(["concacaf.champions", "concacaf.leagues.cup", "usa.open"])
     elif base_domestic in ["jpn.1", "ksa.1", "aus.1"]:
-        candidate_slugs.append("afc.champions")
+        candidate_slugs.extend(["afc.champions", "jpn.world_challenge"])
 
     seen_slugs = []
     for s in candidate_slugs:
@@ -1132,7 +1107,7 @@ async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id
     async def fetch_schedule_slug(s_slug):
         url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/teams/{team_id}/schedule"
         try:
-            resp = await client.get(url, headers=HEADERS)
+            resp = await client.get(url, headers=HEADERS, timeout=8.0)
             if resp.status_code != 200:
                 return []
             data = resp.json()
@@ -1195,6 +1170,8 @@ async def fetch_team_last_5(client: httpx.AsyncClient, league_slug: str, team_id
     ]
     results = await asyncio.gather(*tasks)
     return [r for r in results if r is not None]
+
+
 def analyze_team_tactical_style(last5_list, team_name, is_home=True):
     if not last5_list:
         return {
@@ -1265,7 +1242,7 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
 @app.get("/")
 @app.get("/api/health")
 async def health_check():
-    return {"ok": True, "status": "online", "version": "8.5.0"}
+    return {"ok": True, "status": "online", "version": "9.0.0"}
 
 
 @app.get("/api/teams/search")
@@ -1297,7 +1274,7 @@ async def search_clubs_autocomplete(q: str = ""):
 
 @app.get("/api/team-profile")
 async def get_club_full_profile(team_id: str, league_slug: str = "esp.1", team_name: str = "Club", team_abbr: str = "CLB", team_logo: str = ""):
-    async with httpx.AsyncClient(timeout=18.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         await ensure_league_standings_cached(client, league_slug)
         last_5_matches = await fetch_team_last_5(client, league_slug, team_id)
 
@@ -1328,7 +1305,7 @@ async def get_match_deep_stats(
     away_abbr: str = "VIS",
     event_id: str = ""
 ):
-    async with httpx.AsyncClient(timeout=18.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=16.0, follow_redirects=True) as client:
         await ensure_league_standings_cached(client, league_slug)
         home_last5, away_last5 = await asyncio.gather(
             fetch_team_last_5(client, league_slug, home_id),
@@ -1356,11 +1333,10 @@ async def get_match_deep_stats(
         if event_id:
             try:
                 ev_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/summary?event={event_id}"
-                ev_resp = await client.get(ev_url, headers=HEADERS)
+                ev_resp = await client.get(ev_url, headers=HEADERS, timeout=10.0)
                 if ev_resp.status_code == 200:
                     ev_data = ev_resp.json()
 
-                    # Actualizar posiciones oficiales desde el summary del evento si vienen incluidas
                     for st_group in ev_data.get("standings", {}).get("groups", []):
                         for ent in st_group.get("standings", {}).get("entries", []):
                             tid = str(ent.get("team", {}).get("id", ""))
@@ -1398,13 +1374,15 @@ async def get_match_deep_stats(
 
                     rosters = ev_data.get("rosters", [])
                     if len(rosters) >= 2 and rosters[0].get("roster") and rosters[1].get("roster"):
-                        h_rows, h_sq = build_pitch_and_squad_from_roster(rosters[0].get("roster", []), home_abbr, "", [])
-                        a_rows, a_sq = build_pitch_and_squad_from_roster(rosters[1].get("roster", []), away_abbr, "", [])
+                        home_formation = rosters[0].get("formation") or "4-3-3"
+                        away_formation = rosters[1].get("formation") or "4-4-2"
+                        h_rows, h_sq = build_pitch_and_squad_from_roster(rosters[0].get("roster", []), home_abbr, "", [], official_formation=home_formation)
+                        a_rows, a_sq = build_pitch_and_squad_from_roster(rosters[1].get("roster", []), away_abbr, "", [], official_formation=away_formation)
                         if h_rows and a_rows:
                             confirmed_lineup = {
                                 "confirmed": True,
-                                "homeFormation": rosters[0].get("formation", "4-2-3-1") or "4-2-3-1",
-                                "awayFormation": rosters[1].get("formation", "4-3-3") or "4-3-3",
+                                "homeFormation": home_formation,
+                                "awayFormation": away_formation,
                                 "homeRows": h_rows,
                                 "awayRows": a_rows,
                                 "squadTable": {
@@ -1448,14 +1426,9 @@ async def get_match_deep_stats(
     home_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in home_last5) / h_count * 100) if h_count > 0 else 40
     away_conceded_first_rate = round(sum(m.get("_concededFirst", 0) for m in away_last5) / a_count * 100) if a_count > 0 else 45
 
-    # Posición oficial verificada en la competencia actual
     home_rank_current = get_verified_rank(league_slug, None, home_id, "")
     away_rank_current = get_verified_rank(league_slug, None, away_id, "")
 
-    # =========================================================================
-    # CÁLCULO VERIFICADO DE PROBABILIDAD DE VICTORIA (1X2) Y 1ER GOL
-    # Combina: 1) Cuotas oficiales ESPN (si existen), 2) Posición en la Tabla (#1 vs #18), 3) Forma L5 y Localía
-    # =========================================================================
     if bookmaker_odds["homeWinOdd"] and bookmaker_odds["awayWinOdd"]:
         inv_h = 1.0 / bookmaker_odds["homeWinOdd"]
         inv_a = 1.0 / bookmaker_odds["awayWinOdd"]
@@ -1470,11 +1443,10 @@ async def get_match_deep_stats(
         h_loss_rate = (sum(1 for m in home_last5 if m["result"] == "L") / h_count) if h_count > 0 else 0.30
         a_loss_rate = (sum(1 for m in away_last5 if m["result"] == "L") / a_count) if a_count > 0 else 0.35
 
-        # Peso por posición real en la tabla (ej. PSG #1 vs Le Havre #18)
         rank_bonus_home = 0.0
         rank_bonus_away = 0.0
         if home_rank_current and away_rank_current:
-            rank_diff = away_rank_current - home_rank_current  # Positivo si el Local está mejor ubicado
+            rank_diff = away_rank_current - home_rank_current
             if rank_diff > 0:
                 rank_bonus_home = min(38.0, rank_diff * 2.2)
             elif rank_diff < 0:
@@ -1487,7 +1459,7 @@ async def get_match_deep_stats(
             + (home_goals_avg * 6.5)
             + (home_sot_avg * 1.8)
             + rank_bonus_home
-            + 5.0  # Ventaja de localía
+            + 5.0
         )
         away_strength = (
             15.0
@@ -1504,7 +1476,6 @@ async def get_match_deep_stats(
         win_prob_away = max(10, min(82, round((away_strength / total_str) * 100)))
         win_prob_draw = max(12, 100 - win_prob_home - win_prob_away)
 
-    # Cálculo de 1er Gol alineado con la fuerza real y tasa de apertura de marcador
     raw_home_fg = (home_scored_first_rate * 0.45) + (away_conceded_first_rate * 0.25) + (win_prob_home * 0.30)
     raw_away_fg = (away_scored_first_rate * 0.45) + (home_conceded_first_rate * 0.25) + (win_prob_away * 0.30)
     tot_fg = max(1.0, raw_home_fg + raw_away_fg)
@@ -1789,97 +1760,6 @@ async def get_match_deep_stats(
     }
 
 
-# En draftea-backend/main.py, reemplaza desde THESPORTSDB_LEAGUE_IDS hasta antes de @app.post("/api/verify-tickets"):
-
-THESPORTSDB_LEAGUE_IDS = {
-    "MLS": "4346",
-    "J1_LEAGUE": "4633",
-}
-
-
-async def fetch_espn_schedule_via_league_teams(
-    client: httpx.AsyncClient,
-    league_id: str,
-    league_slug: str,
-    league_info: dict,
-    today_mx_str: str,
-    now_utc: datetime
-):
-    """
-    Motor Oficial ESPN por Calendario de Clubes:
-    Cuando el scoreboard diario de ESPN no lista directamente los Playoffs de MLS (usa.1)
-    o la jornada de J1 League (jpn.1), extrae los partidos próximos directamente del endpoint
-    oficial de equipos de esa liga en ESPN (/sports/soccer/{league_slug}/teams/{id}/schedule),
-    garantizando IDs 100% reales de ESPN con estadísticas, tabla y últimos 5 partidos.
-    """
-    team_ids = []
-    # 1. Obtener IDs de equipos desde la tabla de posiciones o desde el endpoint /teams de la liga
-    lg_ranks = STANDINGS_BY_LEAGUE.get(league_slug, {}).get("ranks", {})
-    for k in lg_ranks.keys():
-        if k.startswith("id:"):
-            tid = k.replace("id:", "").strip()
-            if tid and tid not in team_ids:
-                team_ids.append(tid)
-
-    if len(team_ids) < 6:
-        try:
-            t_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams"
-            t_resp = await client.get(t_url, headers=HEADERS)
-            if t_resp.status_code == 200:
-                t_data = t_resp.json()
-                for sp in (t_data.get("sports") or []):
-                    for lg in (sp.get("leagues") or []):
-                        for tm_wrap in (lg.get("teams") or []):
-                            tm = tm_wrap.get("team") or {}
-                            tid = str(tm.get("id") or "")
-                            if tid and tid not in team_ids:
-                                team_ids.append(tid)
-                                register_team_in_directory(tm, league_slug, league_info["name"])
-        except Exception:
-            pass
-
-    if not team_ids:
-        return []
-
-    # Consultar los calendarios de los clubes de la liga en paralelo controlado
-    sub_sem = asyncio.Semaphore(8)
-
-    async def get_team_upcoming_events(tid_str: str):
-        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{tid_str}/schedule"
-        async with sub_sem:
-            try:
-                r = await client.get(url, headers=HEADERS)
-                if r.status_code != 200:
-                    return []
-                d = r.json()
-                return d.get("events") or []
-            except Exception:
-                return []
-
-    # Tomamos hasta 18 clubes representativos para cubrir toda la jornada sin saturar
-    batches = await asyncio.gather(*(get_team_upcoming_events(tid) for tid in team_ids[:18]))
-    raw_events_map = {}
-    for ev_list in batches:
-        for ev in ev_list:
-            if isinstance(ev, dict) and ev.get("id"):
-                raw_events_map[str(ev.get("id"))] = ev
-
-    if not raw_events_map:
-        return []
-
-    return parse_espn_scoreboard_events(
-        list(raw_events_map.values()),
-        league_id,
-        league_slug,
-        league_info,
-        today_mx_str,
-        now_utc,
-        allow_extended_window=True
-    )
-
-
-# En draftea-backend/main.py, reemplaza desde THESPORTSDB_LEAGUE_IDS hasta el final de fetch_all_leagues_cartelera:
-
 THESPORTSDB_LEAGUE_IDS = {
     "MLS": "4346",
     "J1_LEAGUE": "4633",
@@ -1887,10 +1767,6 @@ THESPORTSDB_LEAGUE_IDS = {
 
 
 async def ensure_league_teams_registered(client: httpx.AsyncClient, league_slug: str, league_name: str):
-    """
-    Descarga el catálogo oficial de clubes de la liga en ESPN (/sports/soccer/{league_slug}/teams)
-    para tener siempre sus IDs reales de ESPN, escudos oficiales y abreviaturas.
-    """
     cache_key = f"teams_loaded_{league_slug}"
     if cache_key in DEEP_CACHE:
         return DEEP_CACHE[cache_key]
@@ -1898,7 +1774,7 @@ async def ensure_league_teams_registered(client: httpx.AsyncClient, league_slug:
     url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams?limit=100"
     club_list = []
     try:
-        resp = await client.get(url, headers=HEADERS)
+        resp = await client.get(url, headers=HEADERS, timeout=7.0)
         if resp.status_code == 200:
             data = resp.json()
             for sp in (data.get("sports") or []):
@@ -1917,22 +1793,16 @@ async def ensure_league_teams_registered(client: httpx.AsyncClient, league_slug:
 
 
 def resolve_espn_team_info(team_name: str, league_slug: str, fallback_id: str, fallback_logo: str):
-    """
-    Busca en el directorio oficial de ESPN el club por nombre para asignarle su teamApiId real de ESPN
-    y su escudo oficial, asegurando que las estadísticas profundas y Últimos 5 siempre carguen de ESPN.
-    """
     target_norm = normalize_text(team_name)
     if not target_norm:
         return fallback_id, team_name[:3].upper(), fallback_logo
 
-    # 1. Coincidencia en la misma liga
     for t_id, info in TEAMS_DIRECTORY.items():
         if info.get("leagueSlug") == league_slug:
             c_norm = normalize_text(info.get("name", ""))
             if target_norm in c_norm or c_norm in target_norm:
                 return t_id, info.get("short") or team_name[:3].upper(), info.get("logo") or fallback_logo
 
-    # 2. Coincidencia por palabra clave (>= 4 letras) en la misma liga
     tokens = [w for w in target_norm.split() if len(w) >= 4 and w not in ["club", "united", "city", "real", "sporting"]]
     for t_id, info in TEAMS_DIRECTORY.items():
         if info.get("leagueSlug") == league_slug:
@@ -1943,83 +1813,12 @@ def resolve_espn_team_info(team_name: str, league_slug: str, fallback_id: str, f
     return fallback_id, team_name[:3].upper(), fallback_logo
 
 
-async def fetch_espn_schedule_via_league_teams(
-    client: httpx.AsyncClient,
-    league_id: str,
-    league_slug: str,
-    league_info: dict,
-    today_mx_str: str,
-    now_utc: datetime
-):
-    """
-    Extrae los próximos partidos oficiales directamente de los clubes de ESPN
-    incluyendo Temporada Regular, Playoffs (seasontype=3) y rondas finales.
-    """
-    clubs = await ensure_league_teams_registered(client, league_slug, league_info["name"])
-    team_ids = [str(c.get("id")) for c in clubs if c.get("id")]
-
-    if not team_ids:
-        lg_ranks = STANDINGS_BY_LEAGUE.get(league_slug, {}).get("ranks", {})
-        for k in lg_ranks.keys():
-            if k.startswith("id:"):
-                tid = k.replace("id:", "").strip()
-                if tid and tid not in team_ids:
-                    team_ids.append(tid)
-
-    if not team_ids:
-        return []
-
-    sub_sem = asyncio.Semaphore(8)
-
-    async def get_team_upcoming_events(tid_str: str):
-        # Consultar tanto schedule normal como postemporada/playoffs (seasontype=3)
-        urls = [
-            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{tid_str}/schedule",
-            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_slug}/teams/{tid_str}/schedule?seasontype=3",
-        ]
-        found_evs = []
-        async with sub_sem:
-            for u in urls:
-                try:
-                    r = await client.get(u, headers=HEADERS)
-                    if r.status_code == 200:
-                        d = r.json()
-                        found_evs.extend(d.get("events") or [])
-                except Exception:
-                    continue
-        return found_evs
-
-    batches = await asyncio.gather(*(get_team_upcoming_events(tid) for tid in team_ids[:20]))
-    raw_events_map = {}
-    for ev_list in batches:
-        for ev in ev_list:
-            if isinstance(ev, dict) and ev.get("id"):
-                raw_events_map[str(ev.get("id"))] = ev
-
-    if not raw_events_map:
-        return []
-
-    return parse_espn_scoreboard_events(
-        list(raw_events_map.values()),
-        league_id,
-        league_slug,
-        league_info,
-        today_mx_str,
-        now_utc,
-        allow_extended_window=True
-    )
-
-
 async def fetch_thesportsdb_fallback_matches(
     client: httpx.AsyncClient,
     league_id: str,
     league_info: dict,
     today_mx_str: str
 ):
-    """
-    Motor secundario oficial (TheSportsDB API v1 con clave pública '3') que además
-    vincula cada club con su teamApiId real de ESPN para que las estadísticas profundas funcionen al 100%.
-    """
     tsdb_id = THESPORTSDB_LEAGUE_IDS.get(league_id)
     if not tsdb_id:
         return []
@@ -2033,11 +1832,11 @@ async def fetch_thesportsdb_fallback_matches(
         f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s=2025",
     ]
 
-    yesterday_str = (datetime.now(timezone.utc).astimezone(MEXICO_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(timezone.utc).astimezone(MEXICO_TZ) - timedelta(days=2)).strftime("%Y-%m-%d")
 
     for url in urls:
         try:
-            resp = await client.get(url, headers=HEADERS)
+            resp = await client.get(url, headers=HEADERS, timeout=7.0)
             if resp.status_code != 200:
                 continue
             events = resp.json().get("events") or []
@@ -2051,19 +1850,15 @@ async def fetch_thesportsdb_fallback_matches(
                 status_str = str(ev.get("strStatus") or "").upper()
                 if not ev_id or date_ev < yesterday_str:
                     continue
-                if any(k in status_str for k in ["FT", "FINISHED", "AOT", "POSTPONED"]):
-                    continue
-                # Si ya tiene marcador final registrado en un evento viejo, omitirlo
-                if ev.get("intHomeScore") is not None and ev.get("intAwayScore") is not None and date_ev < today_mx_str:
+                if any(k in status_str for k in ["POSTPONED", "CANCELED"]):
                     continue
 
                 time_ev = str(ev.get("strTime") or "12:00:00")[:5]
                 iso_str = f"{date_ev}T{time_ev}:00Z"
                 date_mx, time_mx = convert_utc_to_mexico(iso_str)
                 if date_mx < today_mx_str:
-                    # En caso de huso horario japonés, conservar si la fecha original del evento es >= hoy
-                    if date_ev >= today_mx_str:
-                        date_mx = date_ev
+                    if date_ev >= yesterday_str:
+                        date_mx = today_mx_str
                     else:
                         continue
 
@@ -2074,7 +1869,123 @@ async def fetch_thesportsdb_fallback_matches(
                 raw_h_logo = ev.get("strHomeTeamBadge") or ""
                 raw_a_logo = ev.get("strAwayTeamBadge") or ""
 
-                # Vincular con el ID y escudo oficial de ESPN para que Estadísticas y Últimos 5 funcionen
+                home_id_str, home_abbr, home_logo = resolve_espn_team_info(
+                    home_name, league_info["slug"], raw_h_id, raw_h_logo
+                )
+                away_id_str, away_abbr, away_logo = resolve_espn_team_info(
+                    away_name, league_info["slug"], raw_a_id, raw_a_logo
+                )
+
+                out.append({
+                    "id": ev_id,
+                    "kickoffUtc": iso_str,
+                    "leagueId": league_id,
+                    "leagueSlug": league_info["slug"],
+                    "leagueName": league_info["name"],
+                    "leagueProfile": league_info["profile"],
+                    "date": date_mx,
+                    "time": time_mx,
+                    "status": "Por Jugar",
+                    "homeTeam": {
+                        "id": home_abbr,
+                        "teamApiId": home_id_str,
+                        "name": home_name,
+                        "short": home_abbr,
+                        "logo": home_logo,
+                        "rank": get_verified_rank(league_info["slug"], None, home_id_str, home_name),
+                        "formation": "4-2-3-1"
+                    },
+                    "awayTeam": {
+                        "id": away_abbr,
+                        "teamApiId": away_id_str,
+                        "name": away_name,
+                        "short": away_abbr,
+                        "logo": away_logo,
+                        "rank": get_verified_rank(league_info["slug"], None, away_id_str, away_name),
+                        "formation": "4-3-3"
+                    },
+                    "aiTopSignal": f"{home_name} vs {away_name}: Goles ↑ 1.5",
+                    "statsL10": {
+                        "over05Goals": 93,
+                        "over15Goals": 84,
+                        "over25Goals": 66,
+                        "btts": 68,
+                        "homeShotsAvg": 13.8,
+                        "awayShotsAvg": 11.6,
+                        "homeSoTAvg": 4.9,
+                        "awaySoTAvg": 4.1,
+                        "cornersAvg": 9.5
+                    },
+                    "keyPlayers": [],
+                    "goalkeepers": [],
+                    "recentMatches": {"home": [], "away": []}
+                })
+
+            if len(out) > 0:
+                out.sort(key=lambda x: (x["date"], x["time"]))
+                return out[:18]
+        except Exception:
+            continue
+
+    return []
+
+
+async def fetch_thesportsdb_fallback_matches(
+    client: httpx.AsyncClient,
+    league_id: str,
+    league_info: dict,
+    today_mx_str: str
+):
+    tsdb_id = THESPORTSDB_LEAGUE_IDS.get(league_id)
+    if not tsdb_id:
+        return []
+
+    await ensure_league_teams_registered(client, league_info["slug"], league_info["name"])
+
+    now_utc = datetime.now(timezone.utc)
+    current_year = today_mx_str[:4]
+    urls = [
+        f"https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id={tsdb_id}",
+        f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s={current_year}",
+    ]
+
+    for url in urls:
+        try:
+            resp = await client.get(url, headers=HEADERS, timeout=7.0)
+            if resp.status_code != 200:
+                continue
+            events = resp.json().get("events") or []
+            out = []
+
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                ev_id = str(ev.get("idEvent") or "")
+                date_ev = str(ev.get("dateEvent") or "")
+                status_str = str(ev.get("strStatus") or "").upper()
+                if not ev_id or not date_ev:
+                    continue
+                if any(k in status_str for k in ["FT", "FINISHED", "AOT", "POSTPONED", "CANCELED", "LIVE", "1H", "2H", "HT"]):
+                    continue
+                if ev.get("intHomeScore") is not None or ev.get("intAwayScore") is not None:
+                    continue
+
+                time_ev = str(ev.get("strTime") or "12:00:00")[:5]
+                iso_str = f"{date_ev}T{time_ev}:00Z"
+                kickoff_utc = parse_kickoff_utc(iso_str)
+
+
+                date_mx, time_mx = convert_utc_to_mexico(iso_str)
+                if date_mx < today_mx_str:
+                    continue
+
+                home_name = ev.get("strHomeTeam") or "Local"
+                away_name = ev.get("strAwayTeam") or "Visitante"
+                raw_h_id = str(ev.get("idHomeTeam") or home_name[:3].upper())
+                raw_a_id = str(ev.get("idAwayTeam") or away_name[:3].upper())
+                raw_h_logo = ev.get("strHomeTeamBadge") or ""
+                raw_a_logo = ev.get("strAwayTeamBadge") or ""
+
                 home_id_str, home_abbr, home_logo = resolve_espn_team_info(
                     home_name, league_info["slug"], raw_h_id, raw_h_logo
                 )
@@ -2146,296 +2057,322 @@ def parse_espn_scoreboard_events(
     allow_extended_window: bool = False
 ):
     parsed = []
+    now_mx = now_utc.astimezone(MEXICO_TZ)
+    current_hm_mx = now_mx.strftime("%H:%M")
     max_future_date = (
-        (now_utc.astimezone(MEXICO_TZ) + timedelta(days=21 if allow_extended_window else 9)).strftime("%Y-%m-%d")
+        (now_mx + timedelta(days=18 if allow_extended_window else 10)).strftime("%Y-%m-%d")
     )
 
     for ev in (events or []):
-        if not isinstance(ev, dict):
-            continue
-        comp = (ev.get("competitions") or [{}])[0]
-        competitors = comp.get("competitors") or []
-        if len(competitors) >= 2:
+        try:
+            if not isinstance(ev, dict):
+                continue
+            comps_list = ev.get("competitions")
+            comp = comps_list[0] if isinstance(comps_list, list) and len(comps_list) > 0 else {}
+            competitors = comp.get("competitors") or []
+            if len(competitors) < 2:
+                continue
+
             for c_item in competitors:
-                register_team_in_directory(c_item.get("team", {}), league_slug, league_info["name"])
+                if isinstance(c_item, dict):
+                    register_team_in_directory(c_item.get("team") or {}, league_slug, league_info["name"])
 
-        status_type = (comp.get("status") or {}).get("type") or {}
-        state = str(status_type.get("state") or "").lower()
-        completed = bool(status_type.get("completed", False))
+            status_type = (comp.get("status") or {}).get("type") or {}
+            state = str(status_type.get("state") or "").lower()
+            completed = bool(status_type.get("completed", False))
 
-        if completed or state == "post":
+            # Solo partidos que NO han iniciado ni terminado
+            if completed or state in ["post", "in"]:
+                continue
+
+            raw_date_str = str(ev.get("date") or comp.get("date") or "")
+            date_mx, time_mx = convert_utc_to_mexico(raw_date_str)
+
+            # Filtrar por fecha y hora de México en texto simple (sin errores de timezone)
+            if date_mx < today_mx_str or date_mx > max_future_date:
+                continue
+
+            # Si el partido es HOY en México, verificar que su hora (HH:MM) sea mayor a la hora actual
+            match_hm = time_mx[:5]
+            if date_mx == today_mx_str and match_hm <= current_hm_mx:
+                continue
+
+            home = next((c for c in competitors if isinstance(c, dict) and c.get("homeAway") == "home"), competitors[0])
+            away = next((c for c in competitors if isinstance(c, dict) and c.get("homeAway") == "away"), competitors[1])
+
+            home_team_obj = home.get("team") if isinstance(home.get("team"), dict) else {}
+            away_team_obj = away.get("team") if isinstance(away.get("team"), dict) else {}
+
+            home_id_str = str(home_team_obj.get("id") or home.get("id") or "")
+            away_id_str = str(away_team_obj.get("id") or away.get("id") or "")
+            home_name = home_team_obj.get("displayName") or home_team_obj.get("name") or "Local"
+            away_name = away_team_obj.get("displayName") or away_team_obj.get("name") or "Visitante"
+            home_abbr = home_team_obj.get("abbreviation") or home_name[:3].upper()
+            away_abbr = away_team_obj.get("abbreviation") or away_name[:3].upper()
+
+            h_logos = home_team_obj.get("logos")
+            a_logos = away_team_obj.get("logos")
+            home_logo = home_team_obj.get("logo") or (
+                h_logos[0].get("href", "") if isinstance(h_logos, list) and len(h_logos) > 0 and isinstance(h_logos[0], dict) else ""
+            )
+            away_logo = away_team_obj.get("logo") or (
+                a_logos[0].get("href", "") if isinstance(a_logos, list) and len(a_logos) > 0 and isinstance(a_logos[0], dict) else ""
+            )
+
+            real_leaders = []
+            for c_obj in [home, away]:
+                if not isinstance(c_obj, dict):
+                    continue
+                t_short = (c_obj.get("team") or {}).get("abbreviation", home_abbr)
+                for l_cat in (c_obj.get("leaders") or []):
+                    if not isinstance(l_cat, dict):
+                        continue
+                    for l_item in (l_cat.get("leaders") or []):
+                        if not isinstance(l_item, dict):
+                            continue
+                        ath_name = (l_item.get("athlete") or {}).get("displayName")
+                        if ath_name and not any(x["name"] == ath_name for x in real_leaders):
+                            real_leaders.append({"name": ath_name, "team": t_short})
+
+            primary_star = real_leaders[0]["name"] if real_leaders else None
+
+            parsed.append({
+                "id": str(ev.get("id")),
+                "kickoffUtc": raw_date_str,
+                "leagueId": league_id,
+                "leagueSlug": league_slug,
+                "leagueName": league_info["name"],
+                "leagueProfile": league_info["profile"],
+                "date": date_mx,
+                "time": time_mx,
+                "status": "Por Jugar",
+                "homeTeam": {
+                    "id": home_abbr,
+                    "teamApiId": home_id_str,
+                    "name": home_name,
+                    "short": home_abbr,
+                    "logo": home_logo,
+                    "rank": get_verified_rank(league_slug, home, home_id_str, home_name),
+                    "formation": "4-2-3-1"
+                },
+                "awayTeam": {
+                    "id": away_abbr,
+                    "teamApiId": away_id_str,
+                    "name": away_name,
+                    "short": away_abbr,
+                    "logo": away_logo,
+                    "rank": get_verified_rank(league_slug, away, away_id_str, away_name),
+                    "formation": "4-3-3"
+                },
+                "aiTopSignal": (
+                    f"{primary_star} 1.0+ Tiro al Arco"
+                    if primary_star
+                    else f"{home_name} vs {away_name}: Goles ↑ 1.5"
+                ),
+                "statsL10": {
+                    "over05Goals": 94,
+                    "over15Goals": 86,
+                    "over25Goals": 68,
+                    "btts": 70,
+                    "homeShotsAvg": 14.2,
+                    "awayShotsAvg": 11.8,
+                    "homeSoTAvg": 5.1,
+                    "awaySoTAvg": 4.0,
+                    "cornersAvg": 9.6
+                },
+                "keyPlayers": [
+                    {
+                        "id": f"kp-{idx}-{ev.get('id')}",
+                        "name": rl["name"],
+                        "team": rl["team"],
+                        "pos": "DC",
+                        "bancaPlus": True,
+                        "avgShots": 3.2,
+                        "avgSoT": 1.5,
+                        "xG": 0.49,
+                        "l10HitRate": 88,
+                        "propLine": "1.0+ Tiros al Arco",
+                        "odd": 1.38,
+                        "rotationStatus": "TITULAR",
+                        "startsLast5": 5,
+                        "avgMinutes": 85,
+                        "rotationNote": f"Titular clave de {rl['team']} ({league_info['name']}).",
+                        "matchLogs": []
+                    }
+                    for idx, rl in enumerate(real_leaders[:4])
+                ],
+                "goalkeepers": [],
+                "recentMatches": {"home": [], "away": []}
+            })
+        except Exception as ex:
+            print(f"[ERROR PARSE] {league_id}: {ex}")
             continue
 
-        kickoff_utc = parse_kickoff_utc(ev.get("date") or comp.get("date") or "")
-        if state == "pre" and kickoff_utc and kickoff_utc <= (now_utc - timedelta(hours=4)):
-            continue
-
-        date_mx, time_mx = convert_utc_to_mexico(ev.get("date") or comp.get("date") or "")
-        if date_mx < today_mx_str and state != "in":
-            continue
-        if date_mx > max_future_date:
-            continue
-
-        if len(competitors) < 2:
-            continue
-
-        home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
-        away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
-
-        home_team_obj = home.get("team") or {}
-        away_team_obj = away.get("team") or {}
-
-        home_id_str = str(home_team_obj.get("id") or home.get("id") or "")
-        away_id_str = str(away_team_obj.get("id") or away.get("id") or "")
-        home_name = home_team_obj.get("displayName") or home_team_obj.get("name") or "Local"
-        away_name = away_team_obj.get("displayName") or away_team_obj.get("name") or "Visitante"
-        home_abbr = home_team_obj.get("abbreviation") or home_name[:3].upper()
-        away_abbr = away_team_obj.get("abbreviation") or away_name[:3].upper()
-
-        home_logo = home_team_obj.get("logo") or (
-            home_team_obj.get("logos", [{}])[0].get("href", "")
-            if home_team_obj.get("logos")
-            else ""
-        )
-        away_logo = away_team_obj.get("logo") or (
-            away_team_obj.get("logos", [{}])[0].get("href", "")
-            if away_team_obj.get("logos")
-            else ""
-        )
-
-        real_leaders = []
-        for c_obj in [home, away]:
-            t_short = (c_obj.get("team") or {}).get("abbreviation", home_abbr)
-            for l_cat in (c_obj.get("leaders") or []):
-                for l_item in (l_cat.get("leaders") or []):
-                    ath_name = (l_item.get("athlete") or {}).get("displayName")
-                    if ath_name and not any(x["name"] == ath_name for x in real_leaders):
-                        real_leaders.append({"name": ath_name, "team": t_short})
-
-        for l_cat in (comp.get("leaders") or []):
-            for l_item in (l_cat.get("leaders") or []):
-                ath_name = (l_item.get("athlete") or {}).get("displayName")
-                if ath_name and not any(x["name"] == ath_name for x in real_leaders):
-                    real_leaders.append({"name": ath_name, "team": home_abbr})
-
-        primary_star = real_leaders[0]["name"] if real_leaders else None
-
-        parsed.append({
-            "id": str(ev.get("id")),
-            "kickoffUtc": ev.get("date") or comp.get("date") or "",
-            "leagueId": league_id,
-            "leagueSlug": league_slug,
-            "leagueName": league_info["name"],
-            "leagueProfile": league_info["profile"],
-            "date": date_mx,
-            "time": "EN VIVO • " + time_mx if state == "in" else time_mx,
-            "status": "En Vivo" if state == "in" else "Por Jugar",
-            "homeTeam": {
-                "id": home_abbr,
-                "teamApiId": home_id_str,
-                "name": home_name,
-                "short": home_abbr,
-                "logo": home_logo,
-                "rank": get_verified_rank(league_slug, home, home_id_str, home_name),
-                "formation": "4-2-3-1"
-            },
-            "awayTeam": {
-                "id": away_abbr,
-                "teamApiId": away_id_str,
-                "name": away_name,
-                "short": away_abbr,
-                "logo": away_logo,
-                "rank": get_verified_rank(league_slug, away, away_id_str, away_name),
-                "formation": "4-3-3"
-            },
-            "aiTopSignal": (
-                f"{primary_star} 1.0+ Tiro al Arco"
-                if primary_star
-                else f"{home_name} vs {away_name}: Goles ↑ 1.5"
-            ),
-            "statsL10": {
-                "over05Goals": 94,
-                "over15Goals": 86,
-                "over25Goals": 68,
-                "btts": 70,
-                "homeShotsAvg": 14.2,
-                "awayShotsAvg": 11.8,
-                "homeSoTAvg": 5.1,
-                "awaySoTAvg": 4.0,
-                "cornersAvg": 9.6
-            },
-            "keyPlayers": [
-                {
-                    "id": f"kp-{idx}-{ev.get('id')}",
-                    "name": rl["name"],
-                    "team": rl["team"],
-                    "pos": "DC",
-                    "bancaPlus": True,
-                    "avgShots": 3.2,
-                    "avgSoT": 1.5,
-                    "xG": 0.49,
-                    "l10HitRate": 88,
-                    "propLine": "1.0+ Tiros al Arco",
-                    "odd": 1.38,
-                    "rotationStatus": "TITULAR",
-                    "startsLast5": 5,
-                    "avgMinutes": 85,
-                    "rotationNote": f"Titular clave de {rl['team']} ({league_info['name']}).",
-                    "matchLogs": []
-                }
-                for idx, rl in enumerate(real_leaders[:4])
-            ],
-            "goalkeepers": [],
-            "recentMatches": {"home": [], "away": []}
-        })
     return parsed
 
 
-async def fetch_league_on_date(sem: asyncio.Semaphore, client: httpx.AsyncClient, league_id: str, date_yyyymmdd: str):
+async def fetch_league_complete_schedule(
+    client: httpx.AsyncClient,
+    league_id: str,
+    day_strings: list,
+    today_mx_str: str,
+    now_utc: datetime
+):
+    """
+    Descarga el scoreboard general + cada día de la semana para una liga.
+    """
     league_info = LIVE_LEAGUES_MAP.get(league_id)
     if not league_info:
         return []
 
     primary_slug = league_info["slug"]
-    slugs_to_query = [primary_slug]
-    if date_yyyymmdd == "DEFAULT":
-        if league_id == "J1_LEAGUE":
-            slugs_to_query.extend(["jpn.world_challenge", "jpn.2", "afc.champions"])
-        elif league_id == "MLS":
-            slugs_to_query.extend(["usa.open", "concacaf.leagues.cup"])
+    is_special = league_id in ["MLS", "J1_LEAGUE"]
 
-    out_events = []
-    async with sem:
-        for s_slug in slugs_to_query:
-            urls_to_check = []
-            if date_yyyymmdd == "DEFAULT":
-                urls_to_check.append(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard")
-                if league_id in ["MLS", "J1_LEAGUE"]:
-                    # Consultar también Playoffs (seasontype=3) y ventana de 14 días sin parámetro limit
-                    start_w = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
-                    end_w = (datetime.now(timezone.utc) + timedelta(days=14)).strftime("%Y%m%d")
-                    urls_to_check.append(
-                        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?dates={start_w}-{end_w}"
-                    )
-                    urls_to_check.append(
-                        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?seasontype=3"
-                    )
-            else:
-                urls_to_check.append(
-                    f"https://site.api.espn.com/apis/site/v2/sports/soccer/{s_slug}/scoreboard?dates={date_yyyymmdd}"
-                )
+    # 1. URLs por día exacto (formato nativo de ESPN que nunca trunca partidos)
+    urls = [
+        f"https://site.api.espn.com/apis/site/v2/sports/soccer/{primary_slug}/scoreboard?dates={d_str}"
+        for d_str in day_strings
+    ]
+    # 2. Scoreboard general de la liga
+    urls.append(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{primary_slug}/scoreboard")
 
-            for url in urls_to_check:
-                try:
-                    resp = await client.get(url, headers=HEADERS)
-                    if resp.status_code != 200:
-                        continue
-                    events = resp.json().get("events") or []
-                    now_utc = datetime.now(timezone.utc)
-                    today_mx_str = now_utc.astimezone(MEXICO_TZ).strftime("%Y-%m-%d")
-                    out_events.extend(
-                        parse_espn_scoreboard_events(
-                            events,
-                            league_id,
-                            primary_slug,
-                            league_info,
-                            today_mx_str,
-                            now_utc,
-                            allow_extended_window=(league_id in ["MLS", "J1_LEAGUE"])
+    if league_id == "MLS":
+        urls.append("https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?seasontype=3")
+    elif league_id == "J1_LEAGUE":
+        urls.extend([
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/jpn.world_challenge/scoreboard",
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/afc.champions/scoreboard",
+        ])
+
+    sub_sem = asyncio.Semaphore(4)
+
+    async def get_url(u: str):
+        async with sub_sem:
+            try:
+                r = await client.get(u, headers=HEADERS, timeout=12.0)
+                if r.status_code == 200:
+                    d = r.json()
+                    evs = d.get("events") if isinstance(d, dict) else []
+                    if evs:
+                        return parse_espn_scoreboard_events(
+                            evs, league_id, primary_slug, league_info, today_mx_str, now_utc, is_special
                         )
-                    )
-                except Exception:
-                    continue
-    return out_events
+            except Exception:
+                pass
+            return []
+
+    batches = await asyncio.gather(*(get_url(u) for u in urls))
+    out = []
+    seen = set()
+    for b in batches:
+        for m in b:
+            if m["id"] not in seen:
+                seen.add(m["id"])
+                out.append(m)
+    return out
+
+
+CARTELERA_LOCK = asyncio.Lock()
 
 
 @app.get("/api/cartelera-global")
 async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool = False):
-    now_utc = datetime.now(timezone.utc)
-    now_mx = now_utc.astimezone(MEXICO_TZ)
-    today_mx_str = now_mx.strftime("%Y-%m-%d")
+    async with CARTELERA_LOCK:
+        now_utc = datetime.now(timezone.utc)
+        now_mx = now_utc.astimezone(MEXICO_TZ)
+        today_mx_str = now_mx.strftime("%Y-%m-%d")
 
-    if (
-        not force_refresh
-        and CARTELERA_CACHE["timestamp"]
-        and CARTELERA_CACHE["date_key"] == today_mx_str
-        and (now_utc - CARTELERA_CACHE["timestamp"]).total_seconds() < 45
-        and len(CARTELERA_CACHE["matches"]) > 0
-        and any(m["leagueId"] == "MLS" for m in CARTELERA_CACHE["matches"])
-        and any(m["leagueId"] == "J1_LEAGUE" for m in CARTELERA_CACHE["matches"])
-    ):
-        valid_cached = [
-            m for m in CARTELERA_CACHE["matches"]
-            if m["date"] >= today_mx_str
+        if (
+            not force_refresh
+            and CARTELERA_CACHE["timestamp"]
+            and CARTELERA_CACHE["date_key"] == today_mx_str
+            and (now_utc - CARTELERA_CACHE["timestamp"]).total_seconds() < 120
+            and len(CARTELERA_CACHE["matches"]) > 0
+        ):
+            valid_cached = [
+                m for m in CARTELERA_CACHE["matches"]
+                if m["date"] >= today_mx_str
+            ]
+            return {
+                "ok": True,
+                "timezone": "America/Mexico_City (UTC-6)",
+                "total_matches": len(valid_cached),
+                "matches": valid_cached
+            }
+
+        # Días individuales desde hoy hasta +7 días (incluye +1 para huso horario de Japón)
+        day_strings = [
+            (now_mx + timedelta(days=i)).strftime("%Y%m%d")
+            for i in range(0, days_ahead + 2)
         ]
+
+        limits = httpx.Limits(max_keepalive_connections=10, max_connections=16)
+        unique_map = {}
+
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, limits=limits) as client:
+            league_ids = list(LIVE_LEAGUES_MAP.keys())
+            batch_size = 4
+
+            for i in range(0, len(league_ids), batch_size):
+                chunk_ids = league_ids[i : i + batch_size]
+                chunk_results = await asyncio.gather(
+                    *(fetch_league_complete_schedule(client, lg_id, day_strings, today_mx_str, now_utc) for lg_id in chunk_ids),
+                    return_exceptions=True
+                )
+                for batch in chunk_results:
+                    if isinstance(batch, list):
+                        for match in batch:
+                            unique_map[match["id"]] = match
+
+            # Respaldo oficial TheSportsDB para MLS y J1_LEAGUE
+            for special_lg in ["MLS", "J1_LEAGUE"]:
+                has_lg_matches = any(m["leagueId"] == special_lg for m in unique_map.values())
+                if not has_lg_matches and special_lg in LIVE_LEAGUES_MAP:
+                    try:
+                        fb_list = await fetch_thesportsdb_fallback_matches(
+                            client, special_lg, LIVE_LEAGUES_MAP[special_lg], today_mx_str
+                        )
+                        for fb_m in fb_list:
+                            unique_map[fb_m["id"]] = fb_m
+                    except Exception:
+                        pass
+
+            # Cargar tablas de posiciones de las ligas con partidos activos
+            active_slugs = list({m.get("leagueSlug") for m in unique_map.values() if m.get("leagueSlug")})
+            for j in range(0, len(active_slugs), 5):
+                slug_chunk = active_slugs[j : j + 5]
+                await asyncio.gather(
+                    *(ensure_league_standings_cached(client, s) for s in slug_chunk),
+                    return_exceptions=True
+                )
+
+            for m in unique_map.values():
+                lg_s = m.get("leagueSlug", "")
+                if not m["homeTeam"].get("rank"):
+                    m["homeTeam"]["rank"] = get_verified_rank(
+                        lg_s, None, m["homeTeam"]["teamApiId"], m["homeTeam"]["name"]
+                    )
+                if not m["awayTeam"].get("rank"):
+                    m["awayTeam"]["rank"] = get_verified_rank(
+                        lg_s, None, m["awayTeam"]["teamApiId"], m["awayTeam"]["name"]
+                    )
+
+        all_matches = list(unique_map.values())
+        all_matches.sort(key=lambda x: (x["date"], x["time"]))
+
+        if len(all_matches) > 0:
+            CARTELERA_CACHE["timestamp"] = now_utc
+            CARTELERA_CACHE["date_key"] = today_mx_str
+            CARTELERA_CACHE["matches"] = all_matches
+
+        print(f"[OK] Cartelera completa cargada: {len(all_matches)} partidos vigentes.")
+
         return {
             "ok": True,
             "timezone": "America/Mexico_City (UTC-6)",
-            "total_matches": len(valid_cached),
-            "matches": valid_cached
+            "total_matches": len(all_matches),
+            "matches": all_matches
         }
-
-    target_dates = ["DEFAULT"] + [
-        (now_mx + timedelta(days=i)).strftime("%Y%m%d")
-        for i in range(-1, days_ahead + 2)
-    ]
-
-    sem = asyncio.Semaphore(14)
-    async with httpx.AsyncClient(timeout=18.0, follow_redirects=True) as client:
-        await asyncio.gather(
-            *(ensure_league_standings_cached(client, info["slug"]) for info in LIVE_LEAGUES_MAP.values())
-        )
-
-        tasks = [
-            fetch_league_on_date(sem, client, league_id, d_str)
-            for d_str in target_dates
-            for league_id in LIVE_LEAGUES_MAP.keys()
-        ]
-        results = await asyncio.gather(*tasks)
-
-        unique_map = {}
-        for batch in results:
-            for match in batch:
-                unique_map[match["id"]] = match
-
-        # Verificar MLS y J1_LEAGUE con el extractor de calendarios de clubes ESPN y TheSportsDB (key=3)
-        for special_lg in ["MLS", "J1_LEAGUE"]:
-            has_lg_matches = any(m["leagueId"] == special_lg for m in unique_map.values())
-            if not has_lg_matches and special_lg in LIVE_LEAGUES_MAP:
-                lg_info = LIVE_LEAGUES_MAP[special_lg]
-                espn_team_matches = await fetch_espn_schedule_via_league_teams(
-                    client,
-                    special_lg,
-                    lg_info["slug"],
-                    lg_info,
-                    today_mx_str,
-                    now_utc
-                )
-                for em in espn_team_matches:
-                    unique_map[em["id"]] = em
-
-                has_after_espn_teams = any(m["leagueId"] == special_lg for m in unique_map.values())
-                if not has_after_espn_teams:
-                    fb_list = await fetch_thesportsdb_fallback_matches(
-                        client, special_lg, lg_info, today_mx_str
-                    )
-                    for fb_m in fb_list:
-                        unique_map[fb_m["id"]] = fb_m
-
-    all_matches = list(unique_map.values())
-    all_matches.sort(key=lambda x: (x["date"], x["time"]))
-
-    CARTELERA_CACHE["timestamp"] = now_utc
-    CARTELERA_CACHE["date_key"] = today_mx_str
-    CARTELERA_CACHE["matches"] = all_matches
-
-    return {
-        "ok": True,
-        "timezone": "America/Mexico_City (UTC-6)",
-        "total_matches": len(all_matches),
-        "matches": all_matches
-    }
-
 
 @app.post("/api/verify-tickets")
 async def auto_verify_tickets(payload: dict):

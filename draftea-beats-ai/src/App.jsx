@@ -1,79 +1,71 @@
 // src/App.jsx
-import ClubSearchView from './components/ClubSearchView';
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import TopHeaderAndFilters from './components/TopHeaderAndFilters';
-import BottomNav from './components/BottomNav';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  Globe,
+  RefreshCw,
+  BarChart2,
+  Zap,
+  Search,
+  Trophy,
+  Loader2
+} from 'lucide-react';
 import StatsExplorerView from './components/StatsExplorerView';
 import BeatsBuilderView from './components/BeatsBuilderView';
 import HistoryVaultView from './components/HistoryVaultView';
-import { INITIAL_HISTORY_TICKETS, INITIAL_LEARNING_LOGS } from './data/historyData';
-import { purgeExpiredMatchesCache } from './utils/cacheCleaner';
-import { API_BASE_URL } from './utils/apiConfig';
+import ClubSearchView from './components/ClubSearchView';
+import { LEAGUES_CATALOG, FAVORITE_TEAMS } from './data/leaguesData';
+import { triggerHaptic } from './utils/haptics';
 
-const PINNED_CLUB_RULES = {
-  BAR: { keyword: 'barcelona', leagues: ['LALIGA', 'UCL', 'UEL'] },
-  RMA: { keyword: 'real madrid', leagues: ['LALIGA', 'UCL', 'UEL'] },
-  BET: { keyword: 'betis', leagues: ['LALIGA', 'UCL', 'UEL'] },
-  DOR: { keyword: 'dortmund', leagues: ['BUNDESLIGA', 'UCL', 'UEL'] },
-  MCI: { keyword: 'manchester city', leagues: ['PREMIER', 'FA_CUP', 'UCL'] },
-  CAZ: { keyword: 'cruz azul', leagues: ['LIGA_MX'] }
-};
+const IS_LOCALHOST =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (IS_LOCALHOST ? 'http://localhost:8000' : 'https://app-beats.onrender.com');
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('stats');
-  const [selectedLeagues, setSelectedLeagues] = useState([]);
-  const [selectedDates, setSelectedDates] = useState([]);
-  const [pinnedTeams, setPinnedTeams] = useState(['BAR', 'RMA']);
-  const [selectedMatchIds, setSelectedMatchIds] = useState([]);
-
-  const [liveMatches, setLiveMatches] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isVerifying, setIsVerifying] = useState(false);
-
+  const [matches, setMatches] = useState([]);
   const [deepDataMap, setDeepDataMap] = useState({});
+  const [loadingCartelera, setLoadingCartelera] = useState(false);
   const [loadingDeepId, setLoadingDeepId] = useState(null);
 
-  // Nueva llave v2_real para arrancar sin los tickets de adorno pre-cargados
-  const [savedTickets, setSavedTickets] = useState(() => {
+  // Estados de filtros superiores (Ligas, Fechas y Equipos Favoritos)
+  const [selectedLeague, setSelectedLeague] = useState('ALL');
+  const [selectedDate, setSelectedDate] = useState('ALL');
+  const [selectedFavTeams, setSelectedFavTeams] = useState([]);
+
+  // Estados de Beats y Bóveda de Historial
+  const [selectedMatchIds, setSelectedMatchIds] = useState([]);
+  const [historyVault, setHistoryVault] = useState([]);
+  const [learningLogs, setLearningLogs] = useState([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+
+  // 1. Cargar cartelera global desde el backend (26 ligas incluyendo MLS y J1 League)
+  const fetchLiveMatches = useCallback(async (force = false) => {
+    setLoadingCartelera(true);
     try {
-      const saved = localStorage.getItem('draftea_ai_tickets_v2_real');
-      return saved ? JSON.parse(saved) : INITIAL_HISTORY_TICKETS;
-    } catch {
-      return INITIAL_HISTORY_TICKETS;
-    }
-  });
-
-  const [learningLogs, setLearningLogs] = useState(() => {
-    try {
-      const savedLogs = localStorage.getItem('draftea_ai_learning_v2');
-      return savedLogs ? JSON.parse(savedLogs) : INITIAL_LEARNING_LOGS;
-    } catch {
-      return INITIAL_LEARNING_LOGS;
-    }
-  });
-
-  useEffect(() => {
-    purgeExpiredMatchesCache();
-
-    const fetchLiveCartelera = async () => {
-      setIsLoading(true);
-      try {
-        const res = await fetch(`${API_BASE_URL}/api/cartelera-global?days_ahead=6`);
-        const data = await res.json();
-        if (data.ok && Array.isArray(data.matches)) {
-          setLiveMatches(data.matches);
-        }
-      } catch (error) {
-        console.error('Error conectando con el servidor Python:', error);
-      } finally {
-        setIsLoading(false);
+      const url = `${API_BASE_URL}/api/cartelera-global?days_ahead=7${
+        force ? '&force_refresh=true' : ''
+      }`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.matches)) {
+        setMatches(data.matches);
       }
-    };
-
-    fetchLiveCartelera();
+    } catch (err) {
+      console.error('Error cargando cartelera:', err);
+    } finally {
+      setLoadingCartelera(false);
+    }
   }, []);
 
-// En src/App.jsx, reemplaza handleEnsureDeepStats por esta versión:
+  useEffect(() => {
+    fetchLiveMatches(false);
+  }, [fetchLiveMatches]);
+
+  // 2. Descargar estadísticas profundas verificadas (sin guardar en caché si vinieron vacías)
   const handleEnsureDeepStats = useCallback(
     async (match) => {
       if (!match) return;
@@ -89,13 +81,13 @@ export default function App() {
         const url = `${API_BASE_URL}/api/match-deep-stats?league_slug=${encodeURIComponent(
           match.leagueSlug || 'esp.1'
         )}&home_id=${encodeURIComponent(
-          match.homeTeam.teamApiId || ''
+          match.homeTeam?.teamApiId || ''
         )}&away_id=${encodeURIComponent(
-          match.awayTeam.teamApiId || ''
+          match.awayTeam?.teamApiId || ''
         )}&home_abbr=${encodeURIComponent(
-          match.homeTeam.short || 'LOC'
+          match.homeTeam?.short || 'LOC'
         )}&away_abbr=${encodeURIComponent(
-          match.awayTeam.short || 'VIS'
+          match.awayTeam?.short || 'VIS'
         )}&event_id=${encodeURIComponent(match.id)}`;
 
         const res = await fetch(url);
@@ -115,174 +107,389 @@ export default function App() {
     [deepDataMap]
   );
 
-  useEffect(() => {
+  // 3. Cargar y sincronizar Historial y Reglas de Aprendizaje
+  const fetchHistory = useCallback(async () => {
     try {
-      localStorage.setItem('draftea_ai_tickets_v2_real', JSON.stringify(savedTickets));
-    } catch {
-      // Ignorar
+      const res = await fetch(`${API_BASE_URL}/api/history`);
+      const data = await res.json();
+      if (Array.isArray(data.tickets)) setHistoryVault(data.tickets);
+      if (Array.isArray(data.learningLogs)) setLearningLogs(data.learningLogs);
+    } catch (err) {
+      console.error('Error cargando historial:', err);
     }
-  }, [savedTickets]);
+  }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('draftea_ai_learning_v2', JSON.stringify(learningLogs));
-    } catch {
-      // Ignorar
-    }
-  }, [learningLogs]);
+    fetchHistory();
+  }, [fetchHistory]);
 
-// En src/App.jsx, reemplaza handleAutoVerifyTickets por esta versión sin pérdida de reglas:
-  const handleAutoVerifyTickets = useCallback(async () => {
-    if (savedTickets.length === 0) return;
+  const saveHistoryToBackend = async (newTickets, newLogs) => {
+    try {
+      await fetch(`${API_BASE_URL}/api/history/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tickets: newTickets,
+          learningLogs: newLogs
+        })
+      });
+    } catch (err) {
+      console.error('Error sincronizando historial:', err);
+    }
+  };
+
+  const handleSaveTicketToHistory = (ticketObj) => {
+    const updated = [ticketObj, ...historyVault];
+    setHistoryVault(updated);
+    saveHistoryToBackend(updated, learningLogs);
+  };
+
+  const handleToggleLegResult = (ticketId, legIdx) => {
+    const updated = historyVault.map((tk) => {
+      if (tk.id !== ticketId) return tk;
+      const newLegs = (tk.legs || []).map((leg, idx) => {
+        if (idx !== legIdx) return leg;
+        const nextHit = leg.hit === true ? false : leg.hit === false ? null : true;
+        return { ...leg, hit: nextHit };
+      });
+      return { ...tk, legs: newLegs };
+    });
+    setHistoryVault(updated);
+    saveHistoryToBackend(updated, learningLogs);
+  };
+
+  const handleToggleArchiveTicket = (ticketId) => {
+    const updated = historyVault.map((t) =>
+      t.id === ticketId ? { ...t, archived: !t.archived } : t
+    );
+    setHistoryVault(updated);
+    saveHistoryToBackend(updated, learningLogs);
+  };
+
+  const handleAddCustomLearningRule = (ruleObj) => {
+    const updated = [ruleObj, ...learningLogs];
+    setLearningLogs(updated);
+    saveHistoryToBackend(historyVault, updated);
+  };
+
+  const handleAutoVerifyTickets = async () => {
+    if (historyVault.length === 0) return;
     setIsVerifying(true);
+    triggerHaptic('medium');
     try {
       const res = await fetch(`${API_BASE_URL}/api/verify-tickets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tickets: savedTickets,
-          learningLogs
+          tickets: historyVault,
+          learningLogs: learningLogs
         })
       });
       const data = await res.json();
-      if (data.ok && Array.isArray(data.tickets)) {
-        setSavedTickets(data.tickets);
-        if (Array.isArray(data.learningLogs)) {
-          // Fusión sin límite: conserva todas tus reglas de fotos + las nuevas verificadas
-          setLearningLogs((prevLogs) => {
-            const mergedMap = new Map();
-            [...data.learningLogs, ...prevLogs].forEach((item) => {
-              if (item && item.id) mergedMap.set(item.id, item);
-            });
-            return Array.from(mergedMap.values());
-          });
-        }
+      if (data.ok) {
+        setHistoryVault(data.tickets || historyVault);
+        setLearningLogs(data.learningLogs || learningLogs);
+        saveHistoryToBackend(
+          data.tickets || historyVault,
+          data.learningLogs || learningLogs
+        );
+        triggerHaptic('success');
       }
     } catch (err) {
-      console.error('Error auto-verificando tickets:', err);
+      console.error('Error verificando tickets:', err);
     } finally {
       setIsVerifying(false);
     }
-  }, [savedTickets, learningLogs]);
+  };
 
-  const globalAccuracy = useMemo(() => {
-    const settledLegs = savedTickets.reduce(
-      (acc, t) => acc + t.legs.filter((l) => l.hit === true || l.hit === false).length,
-      0
-    );
-    const hitLegs = savedTickets.reduce(
-      (acc, t) => acc + t.legs.filter((l) => l.hit === true).length,
-      0
-    );
-    return settledLegs > 0 ? ((hitLegs / settledLegs) * 100).toFixed(1) : 'En espera';
-  }, [savedTickets]);
+  // 4. Generar dinámicamente las píldoras de fecha (HOY, MAÑANA y siguientes días)
+  const datePills = useMemo(() => {
+    const daysEs = ['DOM', 'LUN', 'MAR', 'MIE', 'JUE', 'VIE', 'SAB'];
+    const monthsEs = [
+      'ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN',
+      'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC'
+    ];
+    const out = [{ key: 'ALL', label: 'TODOS' }];
+    const now = new Date();
 
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(now);
+      d.setDate(now.getDate() + i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const isoKey = `${yyyy}-${mm}-${dd}`;
+      const dayNum = d.getDate();
+      const monthLabel = monthsEs[d.getMonth()];
+      const dayLabel = i === 0 ? 'HOY' : daysEs[d.getDay()];
+
+      out.push({
+        key: isoKey,
+        label: `${dayLabel} ${dayNum} ${monthLabel}`
+      });
+    }
+    return out;
+  }, []);
+
+  // 5. Calcular % de efectividad global verificado desde el historial
+  const hitRateStats = useMemo(() => {
+    let totalSettled = 0;
+    let totalHits = 0;
+    historyVault.forEach((tk) => {
+      (tk.legs || []).forEach((l) => {
+        if (!l.isVoid && (l.hit === true || l.hit === false)) {
+          totalSettled += 1;
+          if (l.hit === true) totalHits += 1;
+        }
+      });
+    });
+    if (totalSettled === 0) return null;
+    return ((totalHits / totalSettled) * 100).toFixed(1);
+  }, [historyVault]);
+
+  // 6. Filtrado de partidos por Liga, Fecha y Equipos Favoritos
   const isMatchPinned = useCallback(
     (match) => {
-      if (!pinnedTeams.length) return false;
-      const homeName = match.homeTeam.name.toLowerCase();
-      const awayName = match.awayTeam.name.toLowerCase();
+      if (selectedMatchIds.includes(match.id)) return true;
+      if (selectedFavTeams.length === 0) return false;
+      const hName = (match.homeTeam?.name || '').toLowerCase();
+      const aName = (match.awayTeam?.name || '').toLowerCase();
+      const hShort = (match.homeTeam?.short || '').toUpperCase();
+      const aShort = (match.awayTeam?.short || '').toUpperCase();
 
-      return pinnedTeams.some((pinId) => {
-        const rule = PINNED_CLUB_RULES[pinId];
-        if (!rule) return false;
-        const nameMatch =
-          homeName.includes(rule.keyword) || awayName.includes(rule.keyword);
-        return nameMatch && rule.leagues.includes(match.leagueId);
+      return selectedFavTeams.some((favId) => {
+        const favObj = FAVORITE_TEAMS.find((f) => f.id === favId);
+        if (!favObj) return false;
+        const favLower = favObj.name.toLowerCase();
+        return (
+          hShort === favObj.id ||
+          aShort === favObj.id ||
+          hName.includes(favLower) ||
+          aName.includes(favLower)
+        );
       });
     },
-    [pinnedTeams]
+    [selectedMatchIds, selectedFavTeams]
   );
 
-  const handleToggleLeague = (id) => {
-    if (id === 'ALL') return setSelectedLeagues([]);
-    setSelectedLeagues((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
-  };
-
-  const handleToggleDate = (id) => {
-    if (id === 'ALL') return setSelectedDates([]);
-    setSelectedDates((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
-  };
-
-  const handleTogglePinTeam = (id) => {
-    setPinnedTeams((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
-  };
-
-  const handleResetFilters = () => {
-    setSelectedLeagues([]);
-    setSelectedDates([]);
-    setPinnedTeams([]);
-  };
-
-  const handleSaveTicketToHistory = (newTicket) => {
-    setSavedTickets((p) => [newTicket, ...p]);
-  };
-
-  const handleAddCustomLearningRule = (newRule) => {
-    setLearningLogs((prev) => [newRule, ...prev]);
-  };
-
-  const handleToggleLegResult = (ticketId, legId) => {
-    setSavedTickets((prev) =>
-      prev.map((tk) => {
-        if (tk.id !== ticketId) return tk;
-        return {
-          ...tk,
-          legs: tk.legs.map((leg) => {
-            if (leg.legId !== legId) return leg;
-            let nextHit;
-            if (leg.hit === null || leg.hit === undefined) nextHit = true;
-            else if (leg.hit === true) nextHit = false;
-            else nextHit = null;
-            return { ...leg, hit: nextHit };
-          })
-        };
-      })
-    );
-  };
-
-  const handleToggleArchiveTicket = (ticketId) => {
-    setSavedTickets((p) =>
-      p.map((tk) => (tk.id === ticketId ? { ...tk, archived: !tk.archived } : tk))
-    );
-  };
-
   const filteredMatches = useMemo(() => {
-    return liveMatches
-      .filter((m) => {
-        const matchLeague =
-          selectedLeagues.length === 0 || selectedLeagues.includes(m.leagueId);
-        const matchDate =
-          selectedDates.length === 0 || selectedDates.includes(m.date);
-        return matchLeague && matchDate;
-      })
-      .sort((a, b) => {
-        const aPinned = isMatchPinned(a);
-        const bPinned = isMatchPinned(b);
-        return Number(bPinned) - Number(aPinned);
-      });
-  }, [liveMatches, selectedLeagues, selectedDates, isMatchPinned]);
+    const list = matches.filter((m) => {
+      if (selectedLeague !== 'ALL' && m.leagueId !== selectedLeague) {
+        return false;
+      }
+      if (selectedDate !== 'ALL' && m.date !== selectedDate) {
+        return false;
+      }
+      return true;
+    });
+
+    // Colocar arriba los partidos de equipos favoritos seleccionados o fijados
+    return [...list].sort((a, b) => {
+      const pinA = isMatchPinned(a) ? 1 : 0;
+      const pinB = isMatchPinned(b) ? 1 : 0;
+      if (pinA !== pinB) return pinB - pinA;
+      return `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`);
+    });
+  }, [matches, selectedLeague, selectedDate, isMatchPinned]);
+
+  const handleToggleFavoriteTeam = (teamId) => {
+    triggerHaptic('light');
+    setSelectedFavTeams((prev) =>
+      prev.includes(teamId) ? prev.filter((id) => id !== teamId) : [...prev, teamId]
+    );
+  };
+
+  const handleResetAllFilters = () => {
+    triggerHaptic('medium');
+    setSelectedLeague('ALL');
+    setSelectedDate('ALL');
+    setSelectedFavTeams([]);
+    fetchLiveMatches(true);
+  };
+
+  const handleApplyPresetFilters = (leaguesArr, teamsArr) => {
+    if (Array.isArray(leaguesArr) && leaguesArr.length === 1) {
+      setSelectedLeague(leaguesArr[0]);
+    } else {
+      setSelectedLeague('ALL');
+    }
+    if (Array.isArray(teamsArr)) {
+      setSelectedFavTeams(teamsArr);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-[#0b0d13] text-gray-100 pb-28">
-      <TopHeaderAndFilters
-        activeTab={activeTab}
-        selectedLeagues={selectedLeagues}
-        onToggleLeague={handleToggleLeague}
-        selectedDates={selectedDates}
-        onToggleDate={handleToggleDate}
-        pinnedTeams={pinnedTeams}
-        onTogglePinTeam={handleTogglePinTeam}
-        onResetFilters={handleResetFilters}
-        globalAccuracy={globalAccuracy}
-      />
-
-      <main className="max-w-4xl mx-auto px-2.5 sm:px-4 pt-3">
-        {isLoading ? (
-          <div className="text-center py-20">
-            <span className="text-emerald-400 font-bold animate-pulse">
-              Descargando Cartelera Oficial de los Próximos 7 Días...
+    <div className="min-h-screen bg-[#090b10] text-white pb-24 font-sans selection:bg-purple-500/30">
+      {/* CABECERA SUPERIOR */}
+      <header className="sticky top-0 z-40 bg-[#090b10]/95 backdrop-blur-md border-b border-gray-800/80 px-4 py-2.5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center font-black text-xs shadow-lg shadow-purple-900/30">
+            D
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-black tracking-tight text-white">
+              DRAFTEA
             </span>
+            <span className="text-[10px] font-extrabold text-purple-300 bg-purple-500/15 border border-purple-500/30 px-2 py-0.5 rounded-md">
+              BEATS AI
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-black text-emerald-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span>{hitRateStats ? `${hitRateStats}% HIT` : `${matches.length} JUEGOS`}</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleResetAllFilters}
+            disabled={loadingCartelera}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#141824] border border-gray-700 hover:border-gray-500 text-[10px] font-bold text-gray-300 hover:text-white transition-all cursor-pointer"
+          >
+            <RefreshCw
+              className={`w-3 h-3 ${
+                loadingCartelera ? 'animate-spin text-purple-400' : ''
+              }`}
+            />
+            <span>{loadingCartelera ? 'Cargando' : 'Limpiar'}</span>
+          </button>
+        </div>
+      </header>
+
+      {/* BARRA DE CÍRCULOS DE LIGAS, FECHAS Y EQUIPOS FAVORITOS (Visible en Estadísticas y Crear Beats) */}
+      {(activeTab === 'stats' || activeTab === 'builder') && (
+        <div className="max-w-5xl mx-auto px-3 pt-3 space-y-2.5">
+          {/* 1. CARRUSEL DE LAS 26 LIGAS (INCLUYE MLS Y J1 LEAGUE JAPÓN) */}
+          <div className="flex items-center gap-3 overflow-x-auto pb-1.5 no-scrollbar">
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic('light');
+                setSelectedLeague('ALL');
+              }}
+              className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
+            >
+              <div
+                className={`w-12 h-12 rounded-full flex items-center justify-center border-2 transition-all ${
+                  selectedLeague === 'ALL'
+                    ? 'bg-purple-600/25 border-purple-400 shadow-lg shadow-purple-900/30'
+                    : 'bg-[#141824] border-gray-800 group-hover:border-gray-600'
+                }`}
+              >
+                <Globe className="w-5 h-5 text-white" />
+              </div>
+              <span
+                className={`text-[10px] font-extrabold ${
+                  selectedLeague === 'ALL' ? 'text-white' : 'text-gray-400'
+                }`}
+              >
+                Todas
+              </span>
+            </button>
+
+            {LEAGUES_CATALOG.map((lg) => {
+              const active = selectedLeague === lg.id;
+              return (
+                <button
+                  key={lg.id}
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setSelectedLeague(active ? 'ALL' : lg.id);
+                    // Al elegir MLS o JPN mostrar todos los días para ver toda su jornada
+                    if (!active && (lg.id === 'MLS' || lg.id === 'J1_LEAGUE')) {
+                      setSelectedDate('ALL');
+                    }
+                  }}
+                  className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
+                >
+                  <div
+                    className={`w-12 h-12 rounded-full bg-white p-2 flex items-center justify-center border-2 transition-all ${
+                      active
+                        ? 'border-purple-400 ring-2 ring-purple-500/40 scale-105'
+                        : 'border-gray-800 opacity-90 group-hover:opacity-100'
+                    }`}
+                  >
+                    <img
+                      src={lg.logo}
+                      alt={lg.name}
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+                  <span
+                    className={`text-[10px] font-extrabold ${
+                      active ? 'text-purple-300' : 'text-gray-400'
+                    }`}
+                  >
+                    {lg.short}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 2. BARRA DE FILTRO POR FECHAS */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+            {datePills.map((pill) => {
+              const active = selectedDate === pill.key;
+              return (
+                <button
+                  key={pill.key}
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setSelectedDate(pill.key);
+                  }}
+                  className={`px-3.5 py-1.5 rounded-full text-[11px] font-extrabold whitespace-nowrap border transition-all cursor-pointer ${
+                    active
+                      ? 'bg-purple-600 text-white border-purple-400 shadow-md shadow-purple-900/30'
+                      : 'bg-[#141824] text-gray-300 border-gray-800 hover:border-gray-700'
+                  }`}
+                >
+                  {pill.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 3. BARRA DE EQUIPOS FAVORITOS */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+            {FAVORITE_TEAMS.map((team) => {
+              const active = selectedFavTeams.includes(team.id);
+              return (
+                <button
+                  key={team.id}
+                  type="button"
+                  onClick={() => handleToggleFavoriteTeam(team.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[11px] font-extrabold whitespace-nowrap transition-all cursor-pointer shrink-0 ${
+                    active
+                      ? 'bg-amber-500/20 border-amber-400 text-amber-200'
+                      : 'bg-[#141824] border-gray-800 text-gray-300 hover:border-gray-700'
+                  }`}
+                >
+                  <img
+                    src={team.logo}
+                    alt={team.name}
+                    className="w-4 h-4 object-contain"
+                  />
+                  <span>{team.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* CONTENEDOR PRINCIPAL DE VISTAS */}
+      <main className="max-w-5xl mx-auto px-3 pt-3">
+        {loadingCartelera && matches.length === 0 ? (
+          <div className="py-16 flex flex-col items-center justify-center gap-3 text-center">
+            <Loader2 className="w-8 h-8 text-purple-400 animate-spin" />
+            <p className="text-xs font-extrabold text-gray-300">
+              Cargando cartelera oficial y tablas de posiciones de ESPN...
+            </p>
           </div>
         ) : (
           <>
@@ -295,36 +502,34 @@ export default function App() {
                 onEnsureDeepStats={handleEnsureDeepStats}
               />
             )}
-            {activeTab === 'beats' && (
+
+            {activeTab === 'builder' && (
               <BeatsBuilderView
-                allMatches={liveMatches}
+                allMatches={matches}
                 filteredMatches={filteredMatches}
                 selectedMatchIds={selectedMatchIds}
                 setSelectedMatchIds={setSelectedMatchIds}
                 deepDataMap={deepDataMap}
                 loadingDeepId={loadingDeepId}
                 onEnsureDeepStats={handleEnsureDeepStats}
-                onApplyPresetFilters={(l, d) => {
-                  setSelectedLeagues(l);
-                  setSelectedDates(d);
-                }}
+                onApplyPresetFilters={handleApplyPresetFilters}
                 onSaveTicketToHistory={handleSaveTicketToHistory}
                 learningLogs={learningLogs}
               />
             )}
-            
-              {activeTab === 'search' && (
-              <ClubSearchView allMatches={liveMatches} />
+
+            {activeTab === 'search' && (
+              <ClubSearchView apiBaseUrl={API_BASE_URL} />
             )}
 
             {activeTab === 'history' && (
               <HistoryVaultView
-                tickets={savedTickets}
+                tickets={historyVault}
+                learningLogs={learningLogs}
                 onToggleLegResult={handleToggleLegResult}
                 onToggleArchiveTicket={handleToggleArchiveTicket}
                 onAutoVerifyTickets={handleAutoVerifyTickets}
                 isVerifying={isVerifying}
-                learningLogs={learningLogs}
                 onAddCustomLearningRule={handleAddCustomLearningRule}
               />
             )}
@@ -332,11 +537,41 @@ export default function App() {
         )}
       </main>
 
-      <BottomNav
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        selectedMatchesCount={selectedMatchIds.length}
-      />
+      {/* BARRA DE NAVEGACIÓN INFERIOR FLOTANTE */}
+      <nav className="fixed bottom-3 left-1/2 -translate-x-1/2 z-50 bg-[#141824]/95 backdrop-blur-md border border-gray-800 rounded-2xl p-1.5 flex items-center gap-1 shadow-2xl">
+        {[
+          { id: 'stats', label: 'Estadísticas', icon: BarChart2 },
+          { id: 'builder', label: 'Crear Beats', icon: Zap },
+          { id: 'search', label: 'Buscador', icon: Search },
+          { id: 'history', label: 'Historial y %', icon: Trophy }
+        ].map((item) => {
+          const IconComponent = item.icon;
+          const active = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                triggerHaptic('light');
+                setActiveTab(item.id);
+              }}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer whitespace-nowrap ${
+                active
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg shadow-purple-900/40'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <IconComponent className="w-3.5 h-3.5" />
+              <span>{item.label}</span>
+              {item.id === 'builder' && selectedMatchIds.length > 0 && (
+                <span className="ml-1 px-1.5 py-0.2 rounded-full bg-emerald-400 text-black text-[9px] font-black">
+                  {selectedMatchIds.length}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
     </div>
   );
 }

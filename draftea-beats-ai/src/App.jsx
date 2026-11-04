@@ -1,4 +1,4 @@
-// src/App.jsx
+// draftea-beats-ai/src/App.jsx
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Globe,
@@ -26,7 +26,6 @@ const RAW_API_URL = (
     : (import.meta.env.VITE_API_URL || 'https://app-beats.onrender.com')
 ).trim();
 
-// .trim() y .replace(/\s+/g, '') eliminan cualquier espacio oculto metido en Vercel
 const API_BASE_URL = (
   !IS_LOCALHOST && RAW_API_URL.includes('localhost')
     ? 'https://app-beats.onrender.com'
@@ -36,6 +35,68 @@ const API_BASE_URL = (
   .replace(/\s+/g, '')
   .replace(/\/+$/, '');
 
+// Rescatador seguro de localStorage (nunca lanza error ni rompe la pantalla)
+function safeReadLocalVault(type) {
+  if (typeof window === 'undefined' || !window.localStorage) return [];
+  try {
+    const knownKeys =
+      type === 'tickets'
+        ? ['draftea_history_vault', 'beats_history_vault', 'historyVault', 'draftea_tickets', 'tickets']
+        : ['draftea_learning_logs', 'beats_learning_logs', 'learningLogs', 'draftea_rules', 'rules'];
+
+    for (const key of knownKeys) {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (parsed && typeof parsed === 'object' && Array.isArray(parsed[type]) && parsed[type].length > 0) {
+          return parsed[type];
+        }
+      } catch (e) {
+        // Ignorar llave corrupta
+      }
+    }
+
+    // Buscar en cualquier otra llave del navegador donde haya quedado guardado el respaldo
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      const raw = window.localStorage.getItem(k);
+      if (!raw || (raw[0] !== '[' && raw[0] !== '{')) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const sample = parsed[0];
+          if (type === 'tickets' && sample && typeof sample === 'object' && Array.isArray(sample.legs)) {
+            return parsed;
+          }
+          if (
+            type === 'learningLogs' &&
+            sample &&
+            typeof sample === 'object' &&
+            (sample.rule || sample.marketType || sample.outcome || sample.tag)
+          ) {
+            return parsed;
+          }
+        } else if (parsed && typeof parsed === 'object') {
+          if (type === 'tickets' && Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
+            return parsed.tickets;
+          }
+          if (type === 'learningLogs' && Array.isArray(parsed.learningLogs) && parsed.learningLogs.length > 0) {
+            return parsed.learningLogs;
+          }
+        }
+      } catch (e) {
+        // Continuar
+      }
+    }
+  } catch (err) {
+    console.error('Error leyendo localStorage:', err);
+  }
+  return [];
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('stats');
   const [matches, setMatches] = useState([]);
@@ -44,18 +105,18 @@ export default function App() {
   const [loadingDeepId, setLoadingDeepId] = useState(null);
   const [networkDebug, setNetworkDebug] = useState(null);
 
-  // Estados de filtros superiores (Ligas, Fechas y Equipos Favoritos)
+  // Estados de filtros superiores
   const [selectedLeague, setSelectedLeague] = useState('ALL');
   const [selectedDate, setSelectedDate] = useState('ALL');
   const [selectedFavTeams, setSelectedFavTeams] = useState([]);
 
-  // Estados de Beats y Bóveda de Historial
+  // Estados de Beats y Bóveda de Historial (inicializados desde la memoria local)
   const [selectedMatchIds, setSelectedMatchIds] = useState([]);
-  const [historyVault, setHistoryVault] = useState([]);
-  const [learningLogs, setLearningLogs] = useState([]);
+  const [historyVault, setHistoryVault] = useState(() => safeReadLocalVault('tickets'));
+  const [learningLogs, setLearningLogs] = useState(() => safeReadLocalVault('learningLogs'));
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // 1. Cargar cartelera global desde el backend con diagnóstico en vivo
+  // 1. Cargar cartelera global desde el backend
   const fetchLiveMatches = useCallback(async (force = false) => {
     setLoadingCartelera(true);
     setNetworkDebug(null);
@@ -93,7 +154,7 @@ export default function App() {
     fetchLiveMatches(false);
   }, [fetchLiveMatches]);
 
-  // 2. Descargar estadísticas profundas verificadas (sin guardar en caché si vinieron vacías)
+  // 2. Descargar estadísticas profundas verificadas
   const handleEnsureDeepStats = useCallback(
     async (match) => {
       if (!match) return;
@@ -135,36 +196,93 @@ export default function App() {
     [deepDataMap]
   );
 
-  // 3. Cargar y sincronizar Historial y Reglas de Aprendizaje
-  const fetchHistory = useCallback(async () => {
+  // 3. Guardar y sincronizar Historial y Reglas (sin borrar nunca con listas vacías)
+  const saveHistoryToBackend = useCallback(async (newTickets, newLogs) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
-      const data = await res.json();
-      if (Array.isArray(data.tickets)) setHistoryVault(data.tickets);
-      if (Array.isArray(data.learningLogs)) setLearningLogs(data.learningLogs);
-    } catch (err) {
-      console.error('Error cargando historial:', err);
-    }
-  }, []);
+      const safeTickets = Array.isArray(newTickets) ? newTickets : [];
+      const safeLogs = Array.isArray(newLogs) ? newLogs : [];
 
-  useEffect(() => {
-    fetchHistory();
-  }, [fetchHistory]);
+      if (typeof window !== 'undefined' && window.localStorage) {
+        if (safeTickets.length > 0) {
+          window.localStorage.setItem('draftea_history_vault', JSON.stringify(safeTickets));
+        }
+        if (safeLogs.length > 0) {
+          window.localStorage.setItem('draftea_learning_logs', JSON.stringify(safeLogs));
+        }
+      }
 
-  const saveHistoryToBackend = async (newTickets, newLogs) => {
-    try {
+      if (safeTickets.length === 0 && safeLogs.length === 0) return;
+
       await fetch(`${API_BASE_URL}/api/history/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tickets: newTickets,
-          learningLogs: newLogs
+          tickets: safeTickets,
+          learningLogs: safeLogs
         })
       });
     } catch (err) {
       console.error('Error sincronizando historial:', err);
     }
-  };
+  }, []);
+
+  const fetchHistory = useCallback(async () => {
+    const localTickets = safeReadLocalVault('tickets');
+    const localLogs = safeReadLocalVault('learningLogs');
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
+      const data = await res.json();
+      const remoteTickets = Array.isArray(data.tickets) ? data.tickets : [];
+      const remoteLogs = Array.isArray(data.learningLogs) ? data.learningLogs : [];
+
+      // Unir tickets locales + remotos sin perder ninguno
+      const ticketMap = new Map();
+      [...remoteTickets, ...localTickets].forEach((tk, idx) => {
+        if (tk && typeof tk === 'object') {
+          const k = tk.id || `tk-${idx}`;
+          ticketMap.set(k, tk);
+        }
+      });
+      const mergedTickets = Array.from(ticketMap.values());
+
+      // Unir reglas de aprendizaje locales + remotas sin perder ninguna
+      const logMap = new Map();
+      [...remoteLogs, ...localLogs].forEach((lg, idx) => {
+        if (lg && typeof lg === 'object') {
+          const k =
+            lg.id ||
+            `${lg.clubCode || ''}-${lg.marketType || ''}-${lg.selection || ''}-${lg.source || idx}`;
+          logMap.set(k, lg);
+        }
+      });
+      const mergedLogs = Array.from(logMap.values());
+
+      setHistoryVault(mergedTickets);
+      setLearningLogs(mergedLogs);
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        if (mergedTickets.length > 0) {
+          window.localStorage.setItem('draftea_history_vault', JSON.stringify(mergedTickets));
+        }
+        if (mergedLogs.length > 0) {
+          window.localStorage.setItem('draftea_learning_logs', JSON.stringify(mergedLogs));
+        }
+      }
+
+      if (mergedTickets.length > remoteTickets.length || mergedLogs.length > remoteLogs.length) {
+        saveHistoryToBackend(mergedTickets, mergedLogs);
+      }
+    } catch (err) {
+      console.error('Error cargando historial:', err);
+      if (localTickets.length > 0) setHistoryVault(localTickets);
+      if (localLogs.length > 0) setLearningLogs(localLogs);
+    }
+  }, [saveHistoryToBackend]);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
 
   const handleSaveTicketToHistory = (ticketObj) => {
     const updated = [ticketObj, ...historyVault];
@@ -215,12 +333,11 @@ export default function App() {
       });
       const data = await res.json();
       if (data.ok) {
-        setHistoryVault(data.tickets || historyVault);
-        setLearningLogs(data.learningLogs || learningLogs);
-        saveHistoryToBackend(
-          data.tickets || historyVault,
-          data.learningLogs || learningLogs
-        );
+        const nextTickets = data.tickets || historyVault;
+        const nextLogs = data.learningLogs || learningLogs;
+        setHistoryVault(nextTickets);
+        setLearningLogs(nextLogs);
+        saveHistoryToBackend(nextTickets, nextLogs);
         triggerHaptic('success');
       }
     } catch (err) {
@@ -230,7 +347,7 @@ export default function App() {
     }
   };
 
-  // 4. Generar dinámicamente las píldoras de fecha (HOY, MAÑANA y siguientes días)
+  // 4. Generar dinámicamente las píldoras de fecha
   const datePills = useMemo(() => {
     const daysEs = ['DOM', 'LUN', 'MAR', 'MIE', 'JUE', 'VIE', 'SAB'];
     const monthsEs = [
@@ -259,7 +376,7 @@ export default function App() {
     return out;
   }, []);
 
-  // 5. Calcular % de efectividad global verificado desde el historial
+  // 5. Calcular % de efectividad global
   const hitRateStats = useMemo(() => {
     let totalSettled = 0;
     let totalHits = 0;
@@ -332,6 +449,7 @@ export default function App() {
     setSelectedDate('ALL');
     setSelectedFavTeams([]);
     fetchLiveMatches(true);
+    fetchHistory();
   };
 
   const handleApplyPresetFilters = (leaguesArr, teamsArr) => {
@@ -385,7 +503,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* PANEL DE DIAGNÓSTICO DE RED (Solo aparece si ocurre un error al conectar) */}
+      {/* PANEL DE DIAGNÓSTICO DE RED */}
       {networkDebug && (
         <div className="max-w-5xl mx-auto mt-2 px-3">
           <div className="bg-red-950/90 border border-red-500 text-red-200 px-3 py-2 rounded-xl text-[11px] font-mono break-all">
@@ -394,10 +512,9 @@ export default function App() {
         </div>
       )}
 
-      {/* BARRA DE CÍRCULOS DE LIGAS, FECHAS Y EQUIPOS FAVORITOS (Visible en Estadísticas y Crear Beats) */}
+      {/* BARRA DE CÍRCULOS DE LIGAS, FECHAS Y EQUIPOS FAVORITOS */}
       {(activeTab === 'stats' || activeTab === 'builder') && (
         <div className="max-w-5xl mx-auto px-3 pt-3 space-y-2.5">
-          {/* 1. CARRUSEL DE LAS 26 LIGAS (INCLUYE MLS Y J1 LEAGUE JAPÓN) */}
           <div className="flex items-center gap-3 overflow-x-auto pb-1.5 no-scrollbar">
             <button
               type="button"
@@ -465,7 +582,6 @@ export default function App() {
             })}
           </div>
 
-          {/* 2. BARRA DE FILTRO POR FECHAS */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
             {datePills.map((pill) => {
               const active = selectedDate === pill.key;
@@ -489,7 +605,6 @@ export default function App() {
             })}
           </div>
 
-          {/* 3. BARRA DE EQUIPOS FAVORITOS */}
           <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
             {FAVORITE_TEAMS.map((team) => {
               const active = selectedFavTeams.includes(team.id);

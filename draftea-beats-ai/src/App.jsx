@@ -20,9 +20,16 @@ const IS_LOCALHOST =
   typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_URL ||
-  (IS_LOCALHOST ? 'http://localhost:8000' : 'https://app-beats.onrender.com');
+const RAW_API_URL = IS_LOCALHOST
+  ? 'http://localhost:8000'
+  : (import.meta.env.VITE_API_URL || 'https://app-beats.onrender.com');
+
+// Limpia cualquier "/" sobrante al final y evita que en producción (Vercel) apunte por error a localhost
+const API_BASE_URL = (
+  !IS_LOCALHOST && RAW_API_URL.includes('localhost')
+    ? 'https://app-beats.onrender.com'
+    : RAW_API_URL
+).replace(/\/+$/, '');
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('stats');
@@ -30,6 +37,7 @@ export default function App() {
   const [deepDataMap, setDeepDataMap] = useState({});
   const [loadingCartelera, setLoadingCartelera] = useState(false);
   const [loadingDeepId, setLoadingDeepId] = useState(null);
+  const [networkDebug, setNetworkDebug] = useState(null);
 
   // Estados de filtros superiores (Ligas, Fechas y Equipos Favoritos)
   const [selectedLeague, setSelectedLeague] = useState('ALL');
@@ -42,20 +50,35 @@ export default function App() {
   const [learningLogs, setLearningLogs] = useState([]);
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // 1. Cargar cartelera global desde el backend (26 ligas incluyendo MLS y J1 League)
+  // 1. Cargar cartelera global desde el backend con diagnóstico en vivo
   const fetchLiveMatches = useCallback(async (force = false) => {
     setLoadingCartelera(true);
+    setNetworkDebug(null);
+    const url = `${API_BASE_URL}/api/cartelera-global?days_ahead=7${
+      force ? '&force_refresh=true' : ''
+    }`;
     try {
-      const url = `${API_BASE_URL}/api/cartelera-global?days_ahead=7${
-        force ? '&force_refresh=true' : ''
-      }`;
-      const res = await fetch(url);
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) {
+        setNetworkDebug(`HTTP Error ${res.status} al pedir: ${url}`);
+        return;
+      }
       const data = await res.json();
       if (data.ok && Array.isArray(data.matches)) {
         setMatches(data.matches);
+        if (data.matches.length === 0) {
+          setNetworkDebug(`El servidor respondió OK pero con 0 partidos desde: ${url}`);
+        }
+      } else {
+        setNetworkDebug(
+          `Respuesta inválida desde ${url}: ${JSON.stringify(data).slice(0, 120)}`
+        );
       }
     } catch (err) {
       console.error('Error cargando cartelera:', err);
+      setNetworkDebug(
+        `Fallo de Red/CORS (${err.message}) intentando conectar a: ${url}`
+      );
     } finally {
       setLoadingCartelera(false);
     }
@@ -110,7 +133,7 @@ export default function App() {
   // 3. Cargar y sincronizar Historial y Reglas de Aprendizaje
   const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/history`);
+      const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
       const data = await res.json();
       if (Array.isArray(data.tickets)) setHistoryVault(data.tickets);
       if (Array.isArray(data.learningLogs)) setLearningLogs(data.learningLogs);
@@ -283,7 +306,6 @@ export default function App() {
       return true;
     });
 
-    // Colocar arriba los partidos de equipos favoritos seleccionados o fijados
     return [...list].sort((a, b) => {
       const pinA = isMatchPinned(a) ? 1 : 0;
       const pinB = isMatchPinned(b) ? 1 : 0;
@@ -358,6 +380,15 @@ export default function App() {
         </div>
       </header>
 
+      {/* PANEL DE DIAGNÓSTICO DE RED (Solo aparece si ocurre un error al conectar) */}
+      {networkDebug && (
+        <div className="max-w-5xl mx-auto mt-2 px-3">
+          <div className="bg-red-950/90 border border-red-500 text-red-200 px-3 py-2 rounded-xl text-[11px] font-mono break-all">
+            <strong>DIAGNÓSTICO DE CONEXIÓN:</strong> {networkDebug}
+          </div>
+        </div>
+      )}
+
       {/* BARRA DE CÍRCULOS DE LIGAS, FECHAS Y EQUIPOS FAVORITOS (Visible en Estadísticas y Crear Beats) */}
       {(activeTab === 'stats' || activeTab === 'builder') && (
         <div className="max-w-5xl mx-auto px-3 pt-3 space-y-2.5">
@@ -398,7 +429,6 @@ export default function App() {
                   onClick={() => {
                     triggerHaptic('light');
                     setSelectedLeague(active ? 'ALL' : lg.id);
-                    // Al elegir MLS o JPN mostrar todos los días para ver toda su jornada
                     if (!active && (lg.id === 'MLS' || lg.id === 'J1_LEAGUE')) {
                       setSelectedDate('ALL');
                     }

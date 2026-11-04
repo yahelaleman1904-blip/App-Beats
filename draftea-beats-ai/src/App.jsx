@@ -20,16 +20,21 @@ const IS_LOCALHOST =
   typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-const RAW_API_URL = IS_LOCALHOST
-  ? 'http://localhost:8000'
-  : (import.meta.env.VITE_API_URL || 'https://app-beats.onrender.com');
+const RAW_API_URL = (
+  IS_LOCALHOST
+    ? 'http://localhost:8000'
+    : (import.meta.env.VITE_API_URL || 'https://app-beats.onrender.com')
+).trim();
 
-// Limpia cualquier "/" sobrante al final y evita que en producción (Vercel) apunte por error a localhost
+// .trim() y .replace(/\s+/g, '') eliminan cualquier espacio oculto metido en Vercel
 const API_BASE_URL = (
   !IS_LOCALHOST && RAW_API_URL.includes('localhost')
     ? 'https://app-beats.onrender.com'
     : RAW_API_URL
-).replace(/\/+$/, '');
+)
+  .trim()
+  .replace(/\s+/g, '')
+  .replace(/\/+$/, '');
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('stats');

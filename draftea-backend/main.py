@@ -2798,6 +2798,8 @@ async def auto_verify_tickets(payload: dict):
                             })
                 except Exception:
                     continue
+# Guardar físicamente en beats_history_vault.json apenas termine de verificar los partidos
+    saved_vault = write_physical_vault(tickets, learning_logs)
 
     return {
         "ok": True,
@@ -2807,20 +2809,108 @@ async def auto_verify_tickets(payload: dict):
     }
 
 
-@app.get("/api/history")
-async def get_permanent_history():
+# Ruta física absoluta dentro de la carpeta draftea-backend
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VAULT_FILE = os.path.join(BASE_DIR, "beats_history_vault.json")
+
+
+def read_physical_vault() -> dict:
+    """Lee el archivo físico beats_history_vault.json o lo crea automáticamente al iniciar."""
     if not os.path.exists(VAULT_FILE):
+        initial_data = {"tickets": [], "learningLogs": []}
+        try:
+            with open(VAULT_FILE, "w", encoding="utf-8") as f:
+                json.dump(initial_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return initial_data
+
+    try:
+        with open(VAULT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {
+                "tickets": data.get("tickets", []) if isinstance(data, dict) else [],
+                "learningLogs": data.get("learningLogs", []) if isinstance(data, dict) else []
+            }
+    except Exception:
         return {"tickets": [], "learningLogs": []}
-    with open(VAULT_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+
+
+def write_physical_vault(tickets: list, learning_logs: list) -> dict:
+    """Une automáticamente los tickets y reglas entrantes con el archivo físico sin borrar nada."""
+    current = read_physical_vault()
+    existing_tickets = current.get("tickets", [])
+    existing_logs = current.get("learningLogs", [])
+
+    # 1. Fusionar Tickets (conservando históricos y actualizando resultados)
+    ticket_map = {}
+    for tk in existing_tickets:
+        if isinstance(tk, dict) and tk.get("id"):
+            ticket_map[str(tk["id"])] = tk
+    for tk in (tickets or []):
+        if isinstance(tk, dict) and tk.get("id"):
+            ticket_map[str(tk["id"])] = tk
+
+    merged_tickets = list(ticket_map.values())
+
+    # 2. Fusionar Reglas de Aprendizaje (+2,000 actuales + nuevas generadas al terminar partidos)
+    log_map = {}
+    for idx, lg in enumerate(existing_logs):
+        if isinstance(lg, dict):
+            key = str(
+                lg.get("id")
+                or f"{lg.get('clubCode','')}-{lg.get('marketType','')}-{lg.get('selection','')}-{lg.get('rule','')}-{idx}"
+            )
+            log_map[key] = lg
+
+    for idx, lg in enumerate(learning_logs or []):
+        if isinstance(lg, dict):
+            key = str(
+                lg.get("id")
+                or f"{lg.get('clubCode','')}-{lg.get('marketType','')}-{lg.get('selection','')}-{lg.get('rule','')}-{idx}"
+            )
+            log_map[key] = lg
+
+    merged_logs = list(log_map.values())
+
+    vault_payload = {
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "totalTickets": len(merged_tickets),
+        "totalLearningRules": len(merged_logs),
+        "tickets": merged_tickets,
+        "learningLogs": merged_logs
+    }
+
+    with open(VAULT_FILE, "w", encoding="utf-8") as f:
+        json.dump(vault_payload, f, ensure_ascii=False, indent=2)
+
+    return vault_payload
+
+
+# Crear/verificar el archivo físico apenas arranque el backend
+read_physical_vault()
+
+
+@app.get("/api/history")
+async def get_history():
+    vault = read_physical_vault()
+    return {
+        "ok": True,
+        "tickets": vault["tickets"],
+        "learningLogs": vault["learningLogs"]
+    }
 
 
 @app.post("/api/history/sync")
 async def sync_history(payload: dict):
-    vault = {
-        "tickets": payload.get("tickets", []),
-        "learningLogs": payload.get("learningLogs", [])
+    incoming_tickets = payload.get("tickets", [])
+    incoming_logs = payload.get("learningLogs", [])
+    saved_vault = write_physical_vault(incoming_tickets, incoming_logs)
+    print(
+        f"[AUTO-SAVE FÍSICO] {len(saved_vault['tickets'])} tickets y {len(saved_vault['learningLogs'])} reglas en {VAULT_FILE}"
+    )
+    return {
+        "ok": True,
+        "tickets": saved_vault["tickets"],
+        "learningLogs": saved_vault["learningLogs"]
     }
-    with open(VAULT_FILE, "w", encoding="utf-8") as f:
-        json.dump(vault, f, ensure_ascii=False, indent=2)
-    return {"ok": True, "saved_tickets": len(vault["tickets"])}

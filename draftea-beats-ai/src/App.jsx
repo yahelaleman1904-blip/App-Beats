@@ -1,5 +1,5 @@
 // draftea-beats-ai/src/App.jsx
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Globe,
   RefreshCw,
@@ -35,7 +35,7 @@ const API_BASE_URL = (
   .replace(/\s+/g, '')
   .replace(/\/+$/, '');
 
-// Rescatador seguro de localStorage (nunca lanza error ni rompe la pantalla)
+// Lectura automática de la memoria local del dispositivo
 function safeReadLocalVault(type) {
   if (typeof window === 'undefined' || !window.localStorage) return [];
   try {
@@ -54,11 +54,10 @@ function safeReadLocalVault(type) {
           return parsed[type];
         }
       } catch (e) {
-        // Ignorar llave corrupta
+        // continuar
       }
     }
 
-    // Buscar en cualquier otra llave del navegador donde haya quedado guardado el respaldo
     for (let i = 0; i < window.localStorage.length; i++) {
       const k = window.localStorage.key(i);
       if (!k) continue;
@@ -88,7 +87,7 @@ function safeReadLocalVault(type) {
           }
         }
       } catch (e) {
-        // Continuar
+        // continuar
       }
     }
   } catch (err) {
@@ -110,11 +109,12 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState('ALL');
   const [selectedFavTeams, setSelectedFavTeams] = useState([]);
 
-  // Estados de Beats y Bóveda de Historial (inicializados desde la memoria local)
+  // Estados de Beats y Bóveda de Historial
   const [selectedMatchIds, setSelectedMatchIds] = useState([]);
   const [historyVault, setHistoryVault] = useState(() => safeReadLocalVault('tickets'));
   const [learningLogs, setLearningLogs] = useState(() => safeReadLocalVault('learningLogs'));
   const [isVerifying, setIsVerifying] = useState(false);
+  const autoVerifiedOnBootRef = useRef(false);
 
   // 1. Cargar cartelera global desde el backend
   const fetchLiveMatches = useCallback(async (force = false) => {
@@ -196,7 +196,7 @@ export default function App() {
     [deepDataMap]
   );
 
-  // 3. Guardar y sincronizar Historial y Reglas (sin borrar nunca con listas vacías)
+  // 3. Guardado físico automático hacia el backend y localStorage
   const saveHistoryToBackend = useCallback(async (newTickets, newLogs) => {
     try {
       const safeTickets = Array.isArray(newTickets) ? newTickets : [];
@@ -213,7 +213,7 @@ export default function App() {
 
       if (safeTickets.length === 0 && safeLogs.length === 0) return;
 
-      await fetch(`${API_BASE_URL}/api/history/sync`, {
+      const res = await fetch(`${API_BASE_URL}/api/history/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -221,11 +221,21 @@ export default function App() {
           learningLogs: safeLogs
         })
       });
+      const data = await res.json();
+      if (data.ok) {
+        if (Array.isArray(data.tickets) && data.tickets.length > safeTickets.length) {
+          setHistoryVault(data.tickets);
+        }
+        if (Array.isArray(data.learningLogs) && data.learningLogs.length > safeLogs.length) {
+          setLearningLogs(data.learningLogs);
+        }
+      }
     } catch (err) {
-      console.error('Error sincronizando historial:', err);
+      console.error('Error sincronizando historial físico:', err);
     }
   }, []);
 
+  // 4. Sincronización automática al abrir la app + Auto-verificación de partidos terminados
   const fetchHistory = useCallback(async () => {
     const localTickets = safeReadLocalVault('tickets');
     const localLogs = safeReadLocalVault('learningLogs');
@@ -236,7 +246,6 @@ export default function App() {
       const remoteTickets = Array.isArray(data.tickets) ? data.tickets : [];
       const remoteLogs = Array.isArray(data.learningLogs) ? data.learningLogs : [];
 
-      // Unir tickets locales + remotos sin perder ninguno
       const ticketMap = new Map();
       [...remoteTickets, ...localTickets].forEach((tk, idx) => {
         if (tk && typeof tk === 'object') {
@@ -246,13 +255,12 @@ export default function App() {
       });
       const mergedTickets = Array.from(ticketMap.values());
 
-      // Unir reglas de aprendizaje locales + remotas sin perder ninguna
       const logMap = new Map();
       [...remoteLogs, ...localLogs].forEach((lg, idx) => {
         if (lg && typeof lg === 'object') {
           const k =
             lg.id ||
-            `${lg.clubCode || ''}-${lg.marketType || ''}-${lg.selection || ''}-${lg.source || idx}`;
+            `${lg.clubCode || ''}-${lg.marketType || ''}-${lg.selection || ''}-${lg.rule || idx}`;
           logMap.set(k, lg);
         }
       });
@@ -270,8 +278,34 @@ export default function App() {
         }
       }
 
-      if (mergedTickets.length > remoteTickets.length || mergedLogs.length > remoteLogs.length) {
-        saveHistoryToBackend(mergedTickets, mergedLogs);
+      // Siempre respaldar en el archivo físico del backend
+      if (mergedTickets.length > 0 || mergedLogs.length > 0) {
+        await saveHistoryToBackend(mergedTickets, mergedLogs);
+      }
+
+      // Si hay partidos pendientes de calificar en los tickets, verificarlos automáticamente en segundo plano
+      const hasPendingLegs = mergedTickets.some((tk) =>
+        !tk.archived && (tk.legs || []).some((l) => l.hit === null || l.hit === undefined)
+      );
+
+      if (hasPendingLegs && !autoVerifiedOnBootRef.current) {
+        autoVerifiedOnBootRef.current = true;
+        const vRes = await fetch(`${API_BASE_URL}/api/verify-tickets`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tickets: mergedTickets,
+            learningLogs: mergedLogs
+          })
+        });
+        const vData = await vRes.json();
+        if (vData.ok) {
+          const updatedTk = vData.tickets || mergedTickets;
+          const updatedLg = vData.learningLogs || mergedLogs;
+          setHistoryVault(updatedTk);
+          setLearningLogs(updatedLg);
+          await saveHistoryToBackend(updatedTk, updatedLg);
+        }
       }
     } catch (err) {
       console.error('Error cargando historial:', err);
@@ -347,7 +381,7 @@ export default function App() {
     }
   };
 
-  // 4. Generar dinámicamente las píldoras de fecha
+  // 5. Generar dinámicamente las píldoras de fecha
   const datePills = useMemo(() => {
     const daysEs = ['DOM', 'LUN', 'MAR', 'MIE', 'JUE', 'VIE', 'SAB'];
     const monthsEs = [
@@ -376,7 +410,7 @@ export default function App() {
     return out;
   }, []);
 
-  // 5. Calcular % de efectividad global
+  // 6. Calcular % de efectividad global
   const hitRateStats = useMemo(() => {
     let totalSettled = 0;
     let totalHits = 0;
@@ -392,7 +426,7 @@ export default function App() {
     return ((totalHits / totalSettled) * 100).toFixed(1);
   }, [historyVault]);
 
-  // 6. Filtrado de partidos por Liga, Fecha y Equipos Favoritos
+  // 7. Filtrado de partidos por Liga, Fecha y Equipos Favoritos
   const isMatchPinned = useCallback(
     (match) => {
       if (selectedMatchIds.includes(match.id)) return true;
@@ -465,7 +499,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#090b10] text-white pb-24 font-sans selection:bg-purple-500/30">
-      {/* CABECERA SUPERIOR */}
+      {/* CABECERA SUPERIOR ORIGINAL LIMPIA */}
       <header className="sticky top-0 z-40 bg-[#090b10]/95 backdrop-blur-md border-b border-gray-800/80 px-4 py-2.5 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center font-black text-xs shadow-lg shadow-purple-900/30">

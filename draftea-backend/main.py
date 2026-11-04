@@ -2817,25 +2817,10 @@ async def get_permanent_history():
 
 @app.post("/api/history/sync")
 async def sync_history(payload: dict):
-    incoming_tickets = payload.get("tickets", [])
-    incoming_logs = payload.get("learningLogs", [])
-
-    existing = {"tickets": [], "learningLogs": []}
-    if os.path.exists(VAULT_FILE):
-        try:
-            with open(VAULT_FILE, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            pass
-
-    # Protección: Si llega vacío por un reinicio, conservar lo que ya estaba guardado
-    final_tickets = incoming_tickets if len(incoming_tickets) > 0 else existing.get("tickets", [])
-    final_logs = incoming_logs if len(incoming_logs) > 0 else existing.get("learningLogs", [])
-
     vault = {
-        "tickets": final_tickets,
-        "learningLogs": final_logs
+        "tickets": payload.get("tickets", []),
+        "learningLogs": payload.get("learningLogs", [])
     }
     with open(VAULT_FILE, "w", encoding="utf-8") as f:
         json.dump(vault, f, ensure_ascii=False, indent=2)
-    return {"ok": True, "saved_tickets": len(vault["tickets"]), "saved_logs": len(vault["learningLogs"])}
+    return {"ok": True, "saved_tickets": len(vault["tickets"])}

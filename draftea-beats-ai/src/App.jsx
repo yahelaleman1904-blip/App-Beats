@@ -44,15 +44,86 @@ export default function App() {
   const [loadingDeepId, setLoadingDeepId] = useState(null);
   const [networkDebug, setNetworkDebug] = useState(null);
 
-  // Estados de filtros superiores (Ligas, Fechas y Equipos Favoritos)
-  const [selectedLeague, setSelectedLeague] = useState('ALL');
-  const [selectedDate, setSelectedDate] = useState('ALL');
-  const [selectedFavTeams, setSelectedFavTeams] = useState([]);
+// Función de rescate: busca tus tickets y reglas en TODAS las llaves posibles del localStorage de tu celular
+  const recoverFromLocalStorage = (type) => {
+    if (typeof window === 'undefined') return [];
+    const ticketKeys = [
+      'draftea_history_vault',
+      'beats_history_vault',
+      'historyVault',
+      'draftea_tickets',
+      'tickets'
+    ];
+    const logKeys = [
+      'draftea_learning_logs',
+      'beats_learning_logs',
+      'learningLogs',
+      'draftea_rules',
+      'rules'
+    ];
 
-  // Estados de Beats y Bóveda de Historial
+    const targetKeys = type === 'tickets' ? ticketKeys : logKeys;
+
+    // 1. Buscar en llaves directas conocidas
+    for (const k of targetKeys) {
+      try {
+        const raw = window.localStorage.getItem(k);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          if (parsed && Array.isArray(parsed[type]) && parsed[type].length > 0) {
+            return parsed[type];
+          }
+        }
+      } catch (e) {
+        // continuar
+      }
+    }
+
+    // 2. Escaneo profundo de TODAS las llaves del teléfono por si tenía otro nombre
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      try {
+        const raw = window.localStorage.getItem(k);
+        if (!raw || (!raw.startsWith('[') && !raw.startsWith('{'))) continue;
+        const parsed = JSON.parse(raw);
+
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const first = parsed[0];
+          if (type === 'tickets' && first && Array.isArray(first.legs)) {
+            return parsed;
+          }
+          if (
+            type === 'learningLogs' &&
+            first &&
+            (first.rule || first.outcome || first.marketType || first.tag)
+          ) {
+            return parsed;
+          }
+        } else if (parsed && typeof parsed === 'object') {
+          if (type === 'tickets' && Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
+            return parsed.tickets;
+          }
+          if (
+            type === 'learningLogs' &&
+            Array.isArray(parsed.learningLogs) &&
+            parsed.learningLogs.length > 0
+          ) {
+            return parsed.learningLogs;
+          }
+        }
+      } catch (e) {
+        // continuar
+      }
+    }
+    return [];
+  };
+
+  // Estados de Beats y Bóveda de Historial inicializados con rescate local
   const [selectedMatchIds, setSelectedMatchIds] = useState([]);
-  const [historyVault, setHistoryVault] = useState([]);
-  const [learningLogs, setLearningLogs] = useState([]);
+  const [historyVault, setHistoryVault] = useState(() => recoverFromLocalStorage('tickets'));
+  const [learningLogs, setLearningLogs] = useState(() => recoverFromLocalStorage('learningLogs'));
   const [isVerifying, setIsVerifying] = useState(false);
 
   // 1. Cargar cartelera global desde el backend con diagnóstico en vivo
@@ -93,7 +164,7 @@ export default function App() {
     fetchLiveMatches(false);
   }, [fetchLiveMatches]);
 
-  // 2. Descargar estadísticas profundas verificadas (sin guardar en caché si vinieron vacías)
+  // 2. Descargar estadísticas profundas verificadas
   const handleEnsureDeepStats = useCallback(
     async (match) => {
       if (!match) return;
@@ -135,24 +206,16 @@ export default function App() {
     [deepDataMap]
   );
 
-  // 3. Cargar y sincronizar Historial y Reglas de Aprendizaje
-  const fetchHistory = useCallback(async () => {
+  // 3. Sincronización Inteligente: UNE lo del teléfono con lo del servidor (NUNCA sobrescribe con vacío)
+  const saveHistoryToBackend = useCallback(async (newTickets, newLogs) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
-      const data = await res.json();
-      if (Array.isArray(data.tickets)) setHistoryVault(data.tickets);
-      if (Array.isArray(data.learningLogs)) setLearningLogs(data.learningLogs);
-    } catch (err) {
-      console.error('Error cargando historial:', err);
-    }
-  }, []);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('draftea_history_vault', JSON.stringify(newTickets));
+        window.localStorage.setItem('draftea_learning_logs', JSON.stringify(newLogs));
+      }
+      // Protección: Nunca mandar un arreglo vacío que pueda borrar el servidor
+      if (newTickets.length === 0 && newLogs.length === 0) return;
 
-  useEffect(() => {
-    fetchHistory();
-  }, [fetchHistory]);
-
-  const saveHistoryToBackend = async (newTickets, newLogs) => {
-    try {
       await fetch(`${API_BASE_URL}/api/history/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -164,71 +227,60 @@ export default function App() {
     } catch (err) {
       console.error('Error sincronizando historial:', err);
     }
-  };
+  }, []);
 
-  const handleSaveTicketToHistory = (ticketObj) => {
-    const updated = [ticketObj, ...historyVault];
-    setHistoryVault(updated);
-    saveHistoryToBackend(updated, learningLogs);
-  };
+  const fetchHistory = useCallback(async () => {
+    const localTickets = recoverFromLocalStorage('tickets');
+    const localLogs = recoverFromLocalStorage('learningLogs');
 
-  const handleToggleLegResult = (ticketId, legIdx) => {
-    const updated = historyVault.map((tk) => {
-      if (tk.id !== ticketId) return tk;
-      const newLegs = (tk.legs || []).map((leg, idx) => {
-        if (idx !== legIdx) return leg;
-        const nextHit = leg.hit === true ? false : leg.hit === false ? null : true;
-        return { ...leg, hit: nextHit };
-      });
-      return { ...tk, legs: newLegs };
-    });
-    setHistoryVault(updated);
-    saveHistoryToBackend(updated, learningLogs);
-  };
-
-  const handleToggleArchiveTicket = (ticketId) => {
-    const updated = historyVault.map((t) =>
-      t.id === ticketId ? { ...t, archived: !t.archived } : t
-    );
-    setHistoryVault(updated);
-    saveHistoryToBackend(updated, learningLogs);
-  };
-
-  const handleAddCustomLearningRule = (ruleObj) => {
-    const updated = [ruleObj, ...learningLogs];
-    setLearningLogs(updated);
-    saveHistoryToBackend(historyVault, updated);
-  };
-
-  const handleAutoVerifyTickets = async () => {
-    if (historyVault.length === 0) return;
-    setIsVerifying(true);
-    triggerHaptic('medium');
     try {
-      const res = await fetch(`${API_BASE_URL}/api/verify-tickets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tickets: historyVault,
-          learningLogs: learningLogs
-        })
-      });
+      const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
       const data = await res.json();
-      if (data.ok) {
-        setHistoryVault(data.tickets || historyVault);
-        setLearningLogs(data.learningLogs || learningLogs);
-        saveHistoryToBackend(
-          data.tickets || historyVault,
-          data.learningLogs || learningLogs
-        );
-        triggerHaptic('success');
+      const remoteTickets = Array.isArray(data.tickets) ? data.tickets : [];
+      const remoteLogs = Array.isArray(data.learningLogs) ? data.learningLogs : [];
+
+      // Combinar sin duplicados (conserva todo lo del celular + todo lo del servidor)
+      const mergedTicketsMap = new Map();
+      [...localTickets, ...remoteTickets].forEach((tk) => {
+        if (tk && tk.id) mergedTicketsMap.set(tk.id, tk);
+      });
+      const finalTickets = Array.from(mergedTicketsMap.values());
+
+      const mergedLogsMap = new Map();
+      [...localLogs, ...remoteLogs].forEach((lg, idx) => {
+        if (lg) {
+          const key = lg.id || `${lg.clubCode || ''}-${lg.marketType || ''}-${lg.selection || ''}-${idx}`;
+          mergedLogsMap.set(key, lg);
+        }
+      });
+      const finalLogs = Array.from(mergedLogsMap.values());
+
+      setHistoryVault(finalTickets);
+      setLearningLogs(finalLogs);
+
+      if (typeof window !== 'undefined') {
+        if (finalTickets.length > 0) {
+          window.localStorage.setItem('draftea_history_vault', JSON.stringify(finalTickets));
+        }
+        if (finalLogs.length > 0) {
+          window.localStorage.setItem('draftea_learning_logs', JSON.stringify(finalLogs));
+        }
+      }
+
+      // Si el celular tenía más datos que Render (porque Render se reinició), resincronizar hacia Render
+      if (finalTickets.length > remoteTickets.length || finalLogs.length > remoteLogs.length) {
+        saveHistoryToBackend(finalTickets, finalLogs);
       }
     } catch (err) {
-      console.error('Error verificando tickets:', err);
-    } finally {
-      setIsVerifying(false);
+      console.error('Error cargando historial:', err);
+      if (localTickets.length > 0) setHistoryVault(localTickets);
+      if (localLogs.length > 0) setLearningLogs(localLogs);
     }
-  };
+  }, [saveHistoryToBackend]);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
 
   // 4. Generar dinámicamente las píldoras de fecha (HOY, MAÑANA y siguientes días)
   const datePills = useMemo(() => {

@@ -2382,9 +2382,17 @@ async def auto_verify_tickets(payload: dict):
 
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         for tk in tickets:
+            # Saltar el ticket completo si ya está verificado al 100%
+            if tk.get("fullyVerified") or all(
+                (leg.get("hit") is not None or leg.get("isVoid"))
+                for leg in (tk.get("legs") or [])
+            ):
+                continue
+
             for leg in tk.get("legs", []):
                 match_id = str(leg.get("matchId", ""))
                 league_slug = leg.get("leagueSlug") or "esp.1"
+                
                 if not match_id or not match_id.isdigit():
                     continue
 
@@ -2836,40 +2844,80 @@ def read_physical_vault() -> dict:
         return {"tickets": [], "learningLogs": []}
 
 
+def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
+    """Conserva siempre los legs ya verificados (hit True/False) y el estado archived."""
+    merged = {**old_tk, **new_tk}
+    old_legs = old_tk.get("legs") if isinstance(old_tk.get("legs"), list) else []
+    new_legs = new_tk.get("legs") if isinstance(new_tk.get("legs"), list) else []
+
+    if len(old_legs) == len(new_legs) and len(old_legs) > 0:
+        final_legs = []
+        for o_leg, n_leg in zip(old_legs, new_legs):
+            if not isinstance(o_leg, dict) or not isinstance(n_leg, dict):
+                final_legs.append(n_leg or o_leg)
+                continue
+            comb_leg = {**o_leg, **n_leg}
+            # Si ya estaba verificado antes y el entrante viene en None, respetar el ya verificado
+            if n_leg.get("hit") is None and o_leg.get("hit") is not None:
+                comb_leg["hit"] = o_leg["hit"]
+                if o_leg.get("actualResult") is not None:
+                    comb_leg["actualResult"] = o_leg["actualResult"]
+            final_legs.append(comb_leg)
+        merged["legs"] = final_legs
+
+    # Si todos los legs ya tienen resultado, marcar el ticket como verificado para no re-revisarlo
+    legs_check = merged.get("legs") or []
+    if len(legs_check) > 0 and all((l.get("hit") is not None or l.get("isVoid")) for l in legs_check):
+        merged["fullyVerified"] = True
+
+    return merged
+
+
+def get_rule_unique_key(lg: dict) -> str:
+    """Genera una huella única estable para cada regla sin depender de su posición en la lista."""
+    if lg.get("id"):
+        return str(lg["id"])
+    club = str(lg.get("clubCode") or lg.get("team") or "").strip().upper()
+    market = str(lg.get("marketType") or lg.get("prop") or "").strip().upper()
+    sel = str(lg.get("selection") or "").strip().upper()
+    rule_txt = str(lg.get("rule") or lg.get("note") or "").strip()
+    date_str = str(lg.get("date") or lg.get("createdAt") or "").strip()
+    return f"{club}|{market}|{sel}|{rule_txt}|{date_str}"
+
+
 def write_physical_vault(tickets: list, learning_logs: list) -> dict:
-    """Une automáticamente los tickets y reglas entrantes con el archivo físico sin borrar nada."""
+    """Une los tickets antiguos y nuevos respetando verificaciones, y anexa todas las reglas nuevas."""
     current = read_physical_vault()
     existing_tickets = current.get("tickets", [])
     existing_logs = current.get("learningLogs", [])
 
-    # 1. Fusionar Tickets (conservando históricos y actualizando resultados)
+    # 1. Fusionar Tickets (antiguos + nuevos, respetando siempre los ya verificados)
     ticket_map = {}
     for tk in existing_tickets:
         if isinstance(tk, dict) and tk.get("id"):
             ticket_map[str(tk["id"])] = tk
+
     for tk in (tickets or []):
         if isinstance(tk, dict) and tk.get("id"):
-            ticket_map[str(tk["id"])] = tk
+            tk_id = str(tk["id"])
+            if tk_id in ticket_map:
+                ticket_map[tk_id] = merge_single_ticket(ticket_map[tk_id], tk)
+            else:
+                ticket_map[tk_id] = tk
 
     merged_tickets = list(ticket_map.values())
+    # Ordenar del más reciente al más antiguo manteniendo el flujo
+    merged_tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
 
-    # 2. Fusionar Reglas de Aprendizaje (+2,000 actuales + nuevas generadas al terminar partidos)
+    # 2. Fusionar Reglas de Aprendizaje (las 2,199 base + todas las nuevas anexadas)
     log_map = {}
-    for idx, lg in enumerate(existing_logs):
+    for lg in existing_logs:
         if isinstance(lg, dict):
-            key = str(
-                lg.get("id")
-                or f"{lg.get('clubCode','')}-{lg.get('marketType','')}-{lg.get('selection','')}-{lg.get('rule','')}-{idx}"
-            )
-            log_map[key] = lg
+            log_map[get_rule_unique_key(lg)] = lg
 
-    for idx, lg in enumerate(learning_logs or []):
+    for lg in (learning_logs or []):
         if isinstance(lg, dict):
-            key = str(
-                lg.get("id")
-                or f"{lg.get('clubCode','')}-{lg.get('marketType','')}-{lg.get('selection','')}-{lg.get('rule','')}-{idx}"
-            )
-            log_map[key] = lg
+            log_map[get_rule_unique_key(lg)] = lg
 
     merged_logs = list(log_map.values())
 
@@ -2885,7 +2933,6 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
         json.dump(vault_payload, f, ensure_ascii=False, indent=2)
 
     return vault_payload
-
 
 # Crear/verificar el archivo físico apenas arranque el backend
 read_physical_vault()

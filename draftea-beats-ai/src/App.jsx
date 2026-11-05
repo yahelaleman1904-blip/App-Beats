@@ -14,6 +14,7 @@ import BeatsBuilderView from './components/BeatsBuilderView';
 import HistoryVaultView from './components/HistoryVaultView';
 import ClubSearchView from './components/ClubSearchView';
 import { LEAGUES_CATALOG, FAVORITE_TEAMS } from './data/leaguesData';
+import * as HistorySeedModule from './data/historyData';
 import { triggerHaptic } from './utils/haptics';
 
 const IS_LOCALHOST =
@@ -40,7 +41,9 @@ const TICKET_STORAGE_KEYS = [
   'beats_history_vault',
   'historyVault',
   'draftea_tickets',
-  'tickets'
+  'tickets',
+  'draftea_beats_history',
+  'savedTickets'
 ];
 
 const LOG_STORAGE_KEYS = [
@@ -48,93 +51,200 @@ const LOG_STORAGE_KEYS = [
   'beats_learning_logs',
   'learningLogs',
   'draftea_rules',
-  'rules'
+  'rules',
+  'aiLearningRules'
 ];
 
-// Huella única para cada regla (evita que se pierdan o se pisen entre recargas)
-function getRuleSignature(lg) {
-  if (!lg || typeof lg !== 'object') return '';
-  if (lg.id) return String(lg.id);
-  const club = String(lg.clubCode || lg.team || '').trim().toUpperCase();
-  const market = String(lg.marketType || lg.prop || '').trim().toUpperCase();
-  const sel = String(lg.selection || '').trim().toUpperCase();
-  const ruleTxt = String(lg.rule || lg.note || '').trim();
-  const dateStr = String(lg.date || lg.createdAt || '').trim();
-  return `${club}|${market}|${sel}|${ruleTxt}|${dateStr}`;
+// Extrae semillas estáticas de src/data/historyData.js si existen en el proyecto
+function getStaticSeedData(type) {
+  try {
+    if (!HistorySeedModule) return [];
+    if (type === 'tickets') {
+      const candidates = [
+        HistorySeedModule.INITIAL_TICKETS,
+        HistorySeedModule.HISTORY_VAULT,
+        HistorySeedModule.INITIAL_HISTORY_VAULT,
+        HistorySeedModule.DEFAULT_TICKETS,
+        HistorySeedModule.tickets,
+        HistorySeedModule.default?.tickets,
+        Array.isArray(HistorySeedModule.default) ? HistorySeedModule.default : null
+      ];
+      for (const c of candidates) {
+        if (Array.isArray(c) && c.length > 0 && c[0] && Array.isArray(c[0].legs)) {
+          return c;
+        }
+      }
+    } else {
+      const candidates = [
+        HistorySeedModule.INITIAL_LEARNING_LOGS,
+        HistorySeedModule.LEARNING_LOGS,
+        HistorySeedModule.DEFAULT_LEARNING_LOGS,
+        HistorySeedModule.INITIAL_RULES,
+        HistorySeedModule.learningLogs,
+        HistorySeedModule.default?.learningLogs
+      ];
+      for (const c of candidates) {
+        if (Array.isArray(c) && c.length > 0) {
+          return c;
+        }
+      }
+    }
+  } catch (e) {
+    // continuar
+  }
+  return [];
 }
 
-// Une dos versiones del mismo ticket conservando SIEMPRE los legs que ya fueron verificados
+// Huella única universal para cada regla (captura cualquier formato de regla para que NUNCA se borren al recargar)
+function getRuleSignature(lg) {
+  if (!lg || typeof lg !== 'object') return '';
+  if (lg.id) return `ID:${String(lg.id)}`;
+
+  const parts = [
+    lg.title || lg.header || lg.tag || '',
+    lg.clubCode || lg.club || lg.team || '',
+    lg.marketType || lg.market || lg.prop || '',
+    lg.selection || lg.pick || '',
+    lg.rule || lg.description || lg.text || lg.note || lg.message || '',
+    lg.source || lg.ticketName || lg.matchup || '',
+    lg.outcome !== undefined ? String(lg.outcome) : '',
+    lg.hit !== undefined ? String(lg.hit) : ''
+  ].map((x) => String(x || '').trim());
+
+  const joined = parts.join('|');
+  if (joined.replace(/\|/g, '').length > 0) {
+    return joined;
+  }
+
+  try {
+    return JSON.stringify(lg);
+  } catch (e) {
+    return String(Math.random());
+  }
+}
+
+// Une dos versiones del mismo ticket conservando SIEMPRE los legs verificados y el estado oculto/archivado
 function mergeTwoTickets(oldTk, newTk) {
   if (!oldTk) return newTk;
   if (!newTk) return oldTk;
 
-  const merged = { ...oldTk, ...newTk };
+  // Determinar cuál versión tiene el cambio de estado más reciente (por ejemplo, si el usuario lo ocultó)
+  const oldTime = Number(oldTk._lastModified || 0);
+  const newTime = Number(newTk._lastModified || 0);
+  const base = newTime >= oldTime ? { ...oldTk, ...newTk } : { ...newTk, ...oldTk };
+
+  // Si en cualquiera de las dos versiones tenía bandera de oculto/archivado y no hay marca explícita más nueva desocultándolo, conservarlo
+  if (oldTime === newTime) {
+    if (oldTk.archived === true || newTk.archived === true) base.archived = true;
+    if (oldTk.hidden === true || newTk.hidden === true) base.hidden = true;
+  }
+
   const oldLegs = Array.isArray(oldTk.legs) ? oldTk.legs : [];
   const newLegs = Array.isArray(newTk.legs) ? newTk.legs : [];
 
   if (oldLegs.length === newLegs.length && oldLegs.length > 0) {
-    merged.legs = newLegs.map((nLeg, idx) => {
+    base.legs = newLegs.map((nLeg, idx) => {
       const oLeg = oldLegs[idx] || {};
-      const comb = { ...oLeg, ...nLeg };
-      // Si uno de los dos ya tiene calificación (true o false) y el otro es null, conservar el calificado
-      if ((nLeg.hit === null || nLeg.hit === undefined) && oLeg.hit !== null && oLeg.hit !== undefined) {
+      const comb = newTime >= oldTime ? { ...oLeg, ...nLeg } : { ...nLeg, ...oLeg };
+
+      // REGLA DE ORO: Si un partido ya fue calificado (hit === true o hit === false), NUNCA permitir que un null lo desmarque
+      const nHasHit = nLeg && (nLeg.hit === true || nLeg.hit === false);
+      const oHasHit = oLeg && (oLeg.hit === true || oLeg.hit === false);
+
+      if (!nHasHit && oHasHit) {
         comb.hit = oLeg.hit;
         if (oLeg.actualResult !== undefined) comb.actualResult = oLeg.actualResult;
+        if (oLeg.finalScore !== undefined) comb.finalScore = oLeg.finalScore;
+        if (oLeg.statValue !== undefined) comb.statValue = oLeg.statValue;
+      } else if (nHasHit && !oHasHit) {
+        comb.hit = nLeg.hit;
+        if (nLeg.actualResult !== undefined) comb.actualResult = nLeg.actualResult;
+        if (nLeg.finalScore !== undefined) comb.finalScore = nLeg.finalScore;
+        if (nLeg.statValue !== undefined) comb.statValue = nLeg.statValue;
       }
+
+      if (oLeg.isVoid || nLeg.isVoid) {
+        comb.isVoid = true;
+      }
+
       return comb;
     });
   } else if (oldLegs.length > 0 && newLegs.length === 0) {
-    merged.legs = oldLegs;
+    base.legs = oldLegs;
   }
 
-  const checkLegs = Array.isArray(merged.legs) ? merged.legs : [];
+  const checkLegs = Array.isArray(base.legs) ? base.legs : [];
   if (
     checkLegs.length > 0 &&
-    checkLegs.every((l) => l.isVoid || l.hit === true || l.hit === false)
+    checkLegs.every((l) => l && (l.isVoid || l.hit === true || l.hit === false))
   ) {
-    merged.fullyVerified = true;
+    base.fullyVerified = true;
+  } else {
+    base.fullyVerified = false;
   }
 
-  return merged;
+  return base;
 }
 
-// Une listas de tickets sin perder los nuevos ni desmarcar los antiguos ya revisados
+// Une listas de tickets sin perder ninguno (CORREGIDO const order = [])
 function mergeTicketLists(listA = [], listB = []) {
   const map = new Map();
-  constOrder = [];
+  const order = [];
 
-  [...listA, ...listB].forEach((tk, idx) => {
+  const safeA = Array.isArray(listA) ? listA : [];
+  const safeB = Array.isArray(listB) ? listB : [];
+
+  [...safeA, ...safeB].forEach((tk, idx) => {
     if (!tk || typeof tk !== 'object') return;
-    const key = String(tk.id || `tk-${idx}`);
+    const legSig = Array.isArray(tk.legs)
+      ? tk.legs
+          .map((l) => `${l?.matchId || l?.matchup || ''}:${l?.selection || l?.prop || ''}`)
+          .join('_')
+      : '';
+    const key = String(tk.id || tk.ticketId || `${tk.createdAt || tk.date || ''}_${legSig}` || `tk-${idx}`);
+
     if (!map.has(key)) {
-      constOrder.push(key);
+      order.push(key);
       map.set(key, tk);
     } else {
       map.set(key, mergeTwoTickets(map.get(key), tk));
     }
   });
 
-  return constOrder.map((k) => map.get(k));
+  return order.map((k) => map.get(k));
 }
 
-// Une listas de reglas conservando las 2,199 base + todas las nuevas
+// Une listas de reglas conservando las 2,199 base + todas las nuevas verificadas
 function mergeRuleLists(listA = [], listB = []) {
   const map = new Map();
-  [...listA, ...listB].forEach((lg) => {
+  const order = [];
+
+  const safeA = Array.isArray(listA) ? listA : [];
+  const safeB = Array.isArray(listB) ? listB : [];
+
+  [...safeA, ...safeB].forEach((lg) => {
     if (!lg || typeof lg !== 'object') return;
     const sig = getRuleSignature(lg);
     if (!sig) return;
-    map.set(sig, { ...(map.get(sig) || {}), ...lg });
+    if (!map.has(sig)) {
+      order.push(sig);
+      map.set(sig, lg);
+    } else {
+      map.set(sig, { ...map.get(sig), ...lg });
+    }
   });
-  return Array.from(map.values());
+
+  return order.map((k) => map.get(k));
 }
 
-// Lee y UNE todas las llaves locales para que una llave vieja nunca pise a las reglas nuevas al recargar
+// Lee y UNE todas las llaves locales + semillas para rescatar los +150 Beats y todas las reglas
 function safeReadLocalVault(type) {
-  if (typeof window === 'undefined' || !window.localStorage) return [];
+  const seedItems = getStaticSeedData(type);
+  if (typeof window === 'undefined' || !window.localStorage) return seedItems;
+
   try {
     const knownKeys = type === 'tickets' ? TICKET_STORAGE_KEYS : LOG_STORAGE_KEYS;
-    let combined = [];
+    let combined = [...seedItems];
 
     for (const key of knownKeys) {
       const raw = window.localStorage.getItem(key);
@@ -142,9 +252,12 @@ function safeReadLocalVault(type) {
       try {
         const parsed = JSON.parse(raw);
         let arr = [];
-        if (Array.isArray(parsed)) arr = parsed;
-        else if (parsed && typeof parsed === 'object' && Array.isArray(parsed[type])) {
-          arr = parsed[type];
+        if (Array.isArray(parsed)) {
+          arr = parsed;
+        } else if (parsed && typeof parsed === 'object') {
+          if (Array.isArray(parsed[type])) arr = parsed[type];
+          else if (type === 'tickets' && Array.isArray(parsed.historyVault)) arr = parsed.historyVault;
+          else if (type === 'learningLogs' && Array.isArray(parsed.rules)) arr = parsed.rules;
         }
         if (arr.length > 0) {
           combined =
@@ -157,7 +270,7 @@ function safeReadLocalVault(type) {
       }
     }
 
-    // Escanear llaves secundarias por si el navegador tenía un respaldo extra
+    // Escaneo completo de cualquier otra llave en localStorage donde estén alojados tickets o reglas
     for (let i = 0; i < window.localStorage.length; i++) {
       const k = window.localStorage.key(i);
       if (!k || knownKeys.includes(k)) continue;
@@ -167,15 +280,38 @@ function safeReadLocalVault(type) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const sample = parsed[0];
-          if (type === 'tickets' && sample && typeof sample === 'object' && Array.isArray(sample.legs)) {
+          if (
+            type === 'tickets' &&
+            sample &&
+            typeof sample === 'object' &&
+            (Array.isArray(sample.legs) || sample.tier || sample.totalOdd)
+          ) {
             combined = mergeTicketLists(combined, parsed);
           } else if (
             type === 'learningLogs' &&
             sample &&
             typeof sample === 'object' &&
-            (sample.rule || sample.marketType || sample.outcome || sample.tag)
+            !Array.isArray(sample.legs) &&
+            (sample.rule ||
+              sample.marketType ||
+              sample.outcome ||
+              sample.tag ||
+              sample.title ||
+              sample.description ||
+              sample.clubCode)
           ) {
             combined = mergeRuleLists(combined, parsed);
+          }
+        } else if (parsed && typeof parsed === 'object') {
+          if (type === 'tickets' && Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
+            combined = mergeTicketLists(combined, parsed.tickets);
+          }
+          if (
+            type === 'learningLogs' &&
+            Array.isArray(parsed.learningLogs) &&
+            parsed.learningLogs.length > 0
+          ) {
+            combined = mergeRuleLists(combined, parsed.learningLogs);
           }
         }
       } catch (e) {
@@ -186,17 +322,18 @@ function safeReadLocalVault(type) {
     return combined;
   } catch (err) {
     console.error('Error leyendo localStorage:', err);
-    return [];
+    return seedItems;
   }
 }
 
-// Guarda en localStorage actualizando también las llaves antiguas para que jamás reaparezca una copia vieja al recargar
+// Escribe de forma atómica en todas las llaves de localStorage para que al recargar jamás regrese a un estado anterior
 function persistToLocalStorage(tickets, logs) {
   if (typeof window === 'undefined' || !window.localStorage) return;
   try {
     if (Array.isArray(tickets) && tickets.length > 0) {
       const serializedTk = JSON.stringify(tickets);
       window.localStorage.setItem('draftea_history_vault', serializedTk);
+      window.localStorage.setItem('beats_history_vault', serializedTk);
       TICKET_STORAGE_KEYS.forEach((k) => {
         if (window.localStorage.getItem(k) !== null) {
           window.localStorage.setItem(k, serializedTk);
@@ -206,6 +343,7 @@ function persistToLocalStorage(tickets, logs) {
     if (Array.isArray(logs) && logs.length > 0) {
       const serializedLg = JSON.stringify(logs);
       window.localStorage.setItem('draftea_learning_logs', serializedLg);
+      window.localStorage.setItem('beats_learning_logs', serializedLg);
       LOG_STORAGE_KEYS.forEach((k) => {
         if (window.localStorage.getItem(k) !== null) {
           window.localStorage.setItem(k, serializedLg);
@@ -230,18 +368,19 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState('ALL');
   const [selectedFavTeams, setSelectedFavTeams] = useState([]);
 
-  // Estados de Beats y Bóveda de Historial
+  // Estados de Beats y Bóveda de Historial (rescatados al instante antes del primer render)
   const [selectedMatchIds, setSelectedMatchIds] = useState([]);
   const [historyVault, setHistoryVault] = useState(() => safeReadLocalVault('tickets'));
   const [learningLogs, setLearningLogs] = useState(() => safeReadLocalVault('learningLogs'));
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // Refs para tener siempre la última versión de tickets y reglas sin cierres obsoletos (stale closures)
   const ticketsRef = useRef(historyVault);
   const logsRef = useRef(learningLogs);
+
   useEffect(() => {
     ticketsRef.current = historyVault;
   }, [historyVault]);
+
   useEffect(() => {
     logsRef.current = learningLogs;
   }, [learningLogs]);
@@ -326,10 +465,10 @@ export default function App() {
     [deepDataMap]
   );
 
-  // 3. Guardado físico y local unificado (Une lo actual + lo nuevo sin perder nada jamás)
-  const saveHistoryToBackend = useCallback(async (newTickets, newLogs) => {
-    const mergedTk = mergeTicketLists(ticketsRef.current, newTickets);
-    const mergedLg = mergeRuleLists(logsRef.current, newLogs);
+  // 3. Guardado físico y local unificado (une lo que hay en memoria + lo nuevo y lo graba en localStorage y Backend)
+  const saveHistoryToBackend = useCallback(async (incomingTickets, incomingLogs) => {
+    const mergedTk = mergeTicketLists(incomingTickets, ticketsRef.current);
+    const mergedLg = mergeRuleLists(logsRef.current, incomingLogs);
 
     ticketsRef.current = mergedTk;
     logsRef.current = mergedLg;
@@ -349,24 +488,35 @@ export default function App() {
         })
       });
       const data = await res.json();
-      if (data.ok) {
-        const serverMergedTk = mergeTicketLists(mergedTk, data.tickets || []);
-        const serverMergedLg = mergeRuleLists(mergedLg, data.learningLogs || []);
-        ticketsRef.current = serverMergedTk;
-        logsRef.current = serverMergedLg;
-        setHistoryVault(serverMergedTk);
-        setLearningLogs(serverMergedLg);
-        persistToLocalStorage(serverMergedTk, serverMergedLg);
+      if (data && data.ok) {
+        // Unir dando prioridad al estado local recién modificado (mergeTicketLists(servidor, local))
+        const syncedTk = mergeTicketLists(data.tickets || [], mergedTk);
+        const syncedLg = mergeRuleLists(data.learningLogs || [], mergedLg);
+
+        ticketsRef.current = syncedTk;
+        logsRef.current = syncedLg;
+        setHistoryVault(syncedTk);
+        setLearningLogs(syncedLg);
+        persistToLocalStorage(syncedTk, syncedLg);
       }
     } catch (err) {
       console.error('Error sincronizando historial físico:', err);
     }
   }, []);
 
-  // 4. Cargar y fusionar al iniciar (sin que el servidor pise tickets verificados ni reglas nuevas)
+  // 4. Cargar y fusionar al iniciar (sin que el servidor pise jamás lo que ya verificaste u ocultaste en el teléfono)
   const fetchHistory = useCallback(async () => {
     const localTickets = safeReadLocalVault('tickets');
     const localLogs = safeReadLocalVault('learningLogs');
+
+    if (localTickets.length > 0) {
+      ticketsRef.current = localTickets;
+      setHistoryVault(localTickets);
+    }
+    if (localLogs.length > 0) {
+      logsRef.current = localLogs;
+      setLearningLogs(localLogs);
+    }
 
     try {
       const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
@@ -374,9 +524,9 @@ export default function App() {
       const remoteTickets = Array.isArray(data.tickets) ? data.tickets : [];
       const remoteLogs = Array.isArray(data.learningLogs) ? data.learningLogs : [];
 
-      // Importante: localTickets tiene prioridad en sus legs verificados y tickets recién creados
-      const mergedTickets = mergeTicketLists(localTickets, remoteTickets);
-      const mergedLogs = mergeRuleLists(localLogs, remoteLogs);
+      // Ponemos remoteTickets primero y localTickets segundo para que en cualquier conflicto gane tu estado local verificado/oculto
+      const mergedTickets = mergeTicketLists(remoteTickets, localTickets);
+      const mergedLogs = mergeRuleLists(remoteLogs, localLogs);
 
       ticketsRef.current = mergedTickets;
       logsRef.current = mergedLogs;
@@ -396,8 +546,6 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error cargando historial:', err);
-      if (localTickets.length > 0) setHistoryVault(localTickets);
-      if (localLogs.length > 0) setLearningLogs(localLogs);
     }
   }, []);
 
@@ -405,14 +553,20 @@ export default function App() {
     fetchHistory();
   }, [fetchHistory]);
 
-  // Guardar un Beat recién creado (se pone al principio y se sincroniza de inmediato)
+  // Guardar un Beat recién creado o subido (con sello de tiempo y guardado inmediato)
   const handleSaveTicketToHistory = (ticketObj) => {
-    const updated = mergeTicketLists([ticketObj], ticketsRef.current);
+    const stampedTicket = {
+      ...ticketObj,
+      id: ticketObj.id || `tk-${Date.now()}`,
+      _lastModified: Date.now()
+    };
+    const updated = mergeTicketLists([stampedTicket], ticketsRef.current);
     saveHistoryToBackend(updated, logsRef.current);
   };
 
-  // Marcar o cambiar manualmente un leg (persiste inmediatamente en todas las llaves y backend)
+  // Marcar o cambiar manualmente el resultado de un partido dentro de un Beat
   const handleToggleLegResult = (ticketId, legIdx) => {
+    const nowTs = Date.now();
     const updated = ticketsRef.current.map((tk) => {
       if (tk.id !== ticketId) return tk;
       const newLegs = (tk.legs || []).map((leg, idx) => {
@@ -423,7 +577,12 @@ export default function App() {
       const allDone =
         newLegs.length > 0 &&
         newLegs.every((l) => l.isVoid || l.hit === true || l.hit === false);
-      return { ...tk, legs: newLegs, fullyVerified: allDone };
+      return {
+        ...tk,
+        legs: newLegs,
+        fullyVerified: allDone,
+        _lastModified: nowTs
+      };
     });
 
     ticketsRef.current = updated;
@@ -432,9 +591,13 @@ export default function App() {
     saveHistoryToBackend(updated, logsRef.current);
   };
 
+  // Ocultar / Mostrar un Beat (se le pone _lastModified para que al recargar la página se quede oculto siempre)
   const handleToggleArchiveTicket = (ticketId) => {
+    const nowTs = Date.now();
     const updated = ticketsRef.current.map((t) =>
-      t.id === ticketId ? { ...t, archived: !t.archived } : t
+      t.id === ticketId
+        ? { ...t, archived: !t.archived, _lastModified: nowTs }
+        : t
     );
     ticketsRef.current = updated;
     setHistoryVault(updated);
@@ -446,25 +609,24 @@ export default function App() {
   const handleAddCustomLearningRule = (ruleObj) => {
     const withId = {
       ...ruleObj,
-      id: ruleObj.id || `rule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      id: ruleObj.id || `rule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: ruleObj.createdAt || new Date().toISOString()
     };
-    const updatedLogs = mergeRuleLists([withId], logsRef.current);
+    const updatedLogs = mergeRuleLists(logsRef.current, [withId]);
     saveHistoryToBackend(ticketsRef.current, updatedLogs);
   };
 
-  // Verificar SOLO los Beats que aún tienen partidos pendientes (sin tocar ni desmarcar los ya verificados)
+  // Verificar SOLO los Beats que aún tienen partidos sin calificar (no toca los ya verificados ni desmarca ocultos)
   const handleAutoVerifyTickets = async () => {
     const currentTickets = ticketsRef.current;
     if (currentTickets.length === 0) return;
 
-    // Separar los tickets que aún tienen algún leg sin revisar (hit === null o undefined)
     const pendingTickets = currentTickets.filter((tk) => {
-      if (tk.fullyVerified) return false;
       const legs = Array.isArray(tk.legs) ? tk.legs : [];
+      if (legs.length === 0) return false;
       return legs.some((l) => !l.isVoid && (l.hit === null || l.hit === undefined));
     });
 
-    // Si todos los tickets ya están revisados al 100%, no volver a revisarlos
     if (pendingTickets.length === 0) {
       triggerHaptic('success');
       return;
@@ -482,12 +644,35 @@ export default function App() {
         })
       });
       const data = await res.json();
-      if (data.ok) {
-        // Unir los tickets recién verificados con los que ya estaban verificados antes
-        const verifiedBatch = Array.isArray(data.tickets) ? data.tickets : [];
+      if (data && data.ok) {
+        const nowTs = Date.now();
+        const verifiedBatch = (Array.isArray(data.tickets) ? data.tickets : []).map((vtk) => {
+          const orig = currentTickets.find((ct) => String(ct.id) === String(vtk.id));
+          return {
+            ...vtk,
+            // Preservar siempre si el ticket estaba oculto/archivado
+            archived: orig ? orig.archived : vtk.archived,
+            _lastModified: nowTs
+          };
+        });
+
+        // Unir los recién verificados con todos los demás tickets
         const finalTickets = mergeTicketLists(currentTickets, verifiedBatch);
-        // Anexar las reglas nuevas generadas por la verificación a las 2,199+ que ya teníamos
-        const finalLogs = mergeRuleLists(logsRef.current, data.learningLogs || []);
+
+        // Asignar ID estable a cualquier regla nueva devuelta por el backend para que nunca se pierda al recargar
+        const incomingRules = (Array.isArray(data.learningLogs) ? data.learningLogs : []).map(
+          (r) => ({
+            ...r,
+            id: r.id || `verified-${getRuleSignature(r)}`
+          })
+        );
+        const finalLogs = mergeRuleLists(logsRef.current, incomingRules);
+
+        ticketsRef.current = finalTickets;
+        logsRef.current = finalLogs;
+        setHistoryVault(finalTickets);
+        setLearningLogs(finalLogs);
+        persistToLocalStorage(finalTickets, finalLogs);
 
         await saveHistoryToBackend(finalTickets, finalLogs);
         triggerHaptic('success');
@@ -528,7 +713,7 @@ export default function App() {
     return out;
   }, []);
 
-  // 6. Calcular % de efectividad global
+  // 6. Calcular % de efectividad global (incluye todos los Beats verificados, estén visibles u ocultos)
   const hitRateStats = useMemo(() => {
     let totalSettled = 0;
     let totalHits = 0;

@@ -2390,6 +2390,10 @@ async def auto_verify_tickets(payload: dict):
                 continue
 
             for leg in tk.get("legs", []):
+                # Si este partido individual ya fue verificado antes, no volver a revisarlo
+                if leg.get("hit") is not None or leg.get("isVoid"):
+                    continue
+
                 match_id = str(leg.get("matchId", ""))
                 league_slug = leg.get("leagueSlug") or "esp.1"
                 
@@ -2874,15 +2878,25 @@ def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
 
 
 def get_rule_unique_key(lg: dict) -> str:
-    """Genera una huella única estable para cada regla sin depender de su posición en la lista."""
+    """Huella única universal para cualquier estructura de regla de aprendizaje."""
+    if not isinstance(lg, dict):
+        return str(lg)
     if lg.get("id"):
-        return str(lg["id"])
-    club = str(lg.get("clubCode") or lg.get("team") or "").strip().upper()
-    market = str(lg.get("marketType") or lg.get("prop") or "").strip().upper()
-    sel = str(lg.get("selection") or "").strip().upper()
-    rule_txt = str(lg.get("rule") or lg.get("note") or "").strip()
-    date_str = str(lg.get("date") or lg.get("createdAt") or "").strip()
-    return f"{club}|{market}|{sel}|{rule_txt}|{date_str}"
+        return f"ID:{lg['id']}"
+    # Usar todos los campos de texto de la regla para que ninguna regla nueva se pierda ni se pise
+    parts = [
+        str(lg.get("title") or lg.get("header") or lg.get("tag") or ""),
+        str(lg.get("clubCode") or lg.get("club") or lg.get("team") or ""),
+        str(lg.get("marketType") or lg.get("market") or lg.get("prop") or ""),
+        str(lg.get("selection") or lg.get("pick") or ""),
+        str(lg.get("rule") or lg.get("description") or lg.get("text") or lg.get("note") or lg.get("message") or ""),
+        str(lg.get("source") or lg.get("ticketName") or ""),
+        str(lg.get("outcome") or lg.get("hit") or "")
+    ]
+    sig = "|".join(p.strip() for p in parts if p is not None)
+    if sig.replace("|", "").strip():
+        return sig
+    return json.dumps(lg, sort_keys=True, ensure_ascii=False)
 
 
 def write_physical_vault(tickets: list, learning_logs: list) -> dict:

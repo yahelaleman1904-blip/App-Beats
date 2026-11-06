@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta, timezone
 import asyncio
 import json
+import gc
 import os
 import re
 import unicodedata
@@ -2941,15 +2942,16 @@ def get_rule_unique_key(lg: dict) -> str:
 
 
 def write_physical_vault(tickets: list, learning_logs: list) -> dict:
-    """Guarda el Checkpoint en beats_history_vault.json respetando ocultos, verificados y nuevas entradas."""
+    """Guarda el Checkpoint liberando memoria RAM al instante para evitar reinicios en Render."""
     current = read_physical_vault()
     existing_tickets = current.get("tickets", [])
     existing_logs = current.get("learningLogs", [])
+    del current
 
     ticket_map = {}
     ticket_order = []
 
-    # Primero registrar el orden de los entrantes (para que los nuevos Beats queden siempre arriba)
+    # 1. Conservar orden y datos de los tickets entrantes (nuevos, verificados y ocultos)
     for tk in (tickets or []):
         if isinstance(tk, dict):
             tk_id = str(tk.get("id") or "")
@@ -2961,7 +2963,7 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
             else:
                 ticket_map[tk_id] = merge_single_ticket(ticket_map[tk_id], tk)
 
-    # Luego fusionar con los que ya existían en disco sin perder ninguno
+    # 2. Unir con los tickets que ya estaban en el archivo sin perder ninguno
     for tk in existing_tickets:
         if isinstance(tk, dict):
             tk_id = str(tk.get("id") or "")
@@ -2975,10 +2977,25 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
 
     merged_tickets = [ticket_map[k] for k in ticket_order]
 
-    # Fusionar Reglas de Aprendizaje (2,202 base + todas las nuevas)
+    # Liberar memoria temporal de tickets
+    del existing_tickets
+    del ticket_map
+    del ticket_order
+
+    # 3. Unir reglas nuevas + las 2,202+ reglas existentes sin perder ninguna
     log_map = {}
     log_order = []
-    for lg in (learning_logs or []) + existing_logs:
+
+    for lg in (learning_logs or []):
+        if isinstance(lg, dict):
+            k = get_rule_unique_key(lg)
+            if k not in log_map:
+                log_order.append(k)
+                log_map[k] = lg
+            else:
+                log_map[k] = {**log_map[k], **lg}
+
+    for lg in existing_logs:
         if isinstance(lg, dict):
             k = get_rule_unique_key(lg)
             if k not in log_map:
@@ -2989,6 +3006,11 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
 
     merged_logs = [log_map[k] for k in log_order]
 
+    # Liberar memoria temporal de reglas
+    del existing_logs
+    del log_map
+    del log_order
+
     vault_payload = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "totalTickets": len(merged_tickets),
@@ -2997,8 +3019,12 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
         "learningLogs": merged_logs
     }
 
+    # Guardar compacto en disco para usar menos RAM y escribir más rápido
     with open(VAULT_FILE, "w", encoding="utf-8") as f:
-        json.dump(vault_payload, f, ensure_ascii=False, indent=2)
+        json.dump(vault_payload, f, ensure_ascii=False, separators=(',', ':'))
+
+    # Vaciar la memoria RAM sobrante inmediatamente
+    gc.collect()
 
     return vault_payload
 

@@ -2849,33 +2849,8 @@ def read_physical_vault() -> dict:
 
 
 def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
-    """Respeta siempre el Checkpoint más reciente de oculto/visible y conserva los partidos ya verificados."""
-    old_mod = int(old_tk.get("_lastModified") or 0)
-    new_mod = int(new_tk.get("_lastModified") or 0)
-
-    if new_mod >= old_mod:
-        merged = {**old_tk, **new_tk}
-    else:
-        merged = {**new_tk, **old_tk}
-
-    # Respetar estrictamente la última decisión del usuario sobre Ocultar / Desocultar
-    old_arch_ts = int(old_tk.get("_archivedUpdatedAt") or old_mod or 0)
-    new_arch_ts = int(new_tk.get("_archivedUpdatedAt") or new_mod or 0)
-    if new_arch_ts >= old_arch_ts:
-        if "archived" in new_tk:
-            merged["archived"] = bool(new_tk["archived"])
-        if "hidden" in new_tk:
-            merged["hidden"] = bool(new_tk["hidden"])
-        merged["_archivedUpdatedAt"] = new_arch_ts
-    else:
-        if "archived" in old_tk:
-            merged["archived"] = bool(old_tk["archived"])
-        if "hidden" in old_tk:
-            merged["hidden"] = bool(old_tk["hidden"])
-        merged["_archivedUpdatedAt"] = old_arch_ts
-
-    merged["_lastModified"] = max(old_mod, new_mod)
-
+    """Conserva siempre los legs ya verificados (hit True/False) y el estado archived."""
+    merged = {**old_tk, **new_tk}
     old_legs = old_tk.get("legs") if isinstance(old_tk.get("legs"), list) else []
     new_legs = new_tk.get("legs") if isinstance(new_tk.get("legs"), list) else []
 
@@ -2885,36 +2860,19 @@ def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
             if not isinstance(o_leg, dict) or not isinstance(n_leg, dict):
                 final_legs.append(n_leg or o_leg)
                 continue
-            comb_leg = {**o_leg, **n_leg} if new_mod >= old_mod else {**n_leg, **o_leg}
-
-            # Si en cualquiera de los dos ya fue verificado (True/False), jamás regresar a None ("En Curso")
-            o_hit = o_leg.get("hit")
-            n_hit = n_leg.get("hit")
-            if (n_hit is True or n_hit is False) and (o_hit is None):
-                comb_leg["hit"] = n_hit
-                for k_stat in ("actualResult", "finalScore", "statValue", "statusText"):
-                    if n_leg.get(k_stat) is not None:
-                        comb_leg[k_stat] = n_leg[k_stat]
-            elif (o_hit is True or o_hit is False) and (n_hit is None):
-                comb_leg["hit"] = o_hit
-                for k_stat in ("actualResult", "finalScore", "statValue", "statusText"):
-                    if o_leg.get(k_stat) is not None:
-                        comb_leg[k_stat] = o_leg[k_stat]
-
-            if o_leg.get("isVoid") or n_leg.get("isVoid"):
-                comb_leg["isVoid"] = True
-
+            comb_leg = {**o_leg, **n_leg}
+            # Si ya estaba verificado antes y el entrante viene en None, respetar el ya verificado
+            if n_leg.get("hit") is None and o_leg.get("hit") is not None:
+                comb_leg["hit"] = o_leg["hit"]
+                if o_leg.get("actualResult") is not None:
+                    comb_leg["actualResult"] = o_leg["actualResult"]
             final_legs.append(comb_leg)
         merged["legs"] = final_legs
 
+    # Si todos los legs ya tienen resultado, marcar el ticket como verificado para no re-revisarlo
     legs_check = merged.get("legs") or []
-    if len(legs_check) > 0 and all(
-        isinstance(l, dict) and (l.get("hit") in (True, False) or l.get("isVoid"))
-        for l in legs_check
-    ):
+    if len(legs_check) > 0 and all((l.get("hit") is not None or l.get("isVoid")) for l in legs_check):
         merged["fullyVerified"] = True
-    else:
-        merged["fullyVerified"] = False
 
     return merged
 
@@ -2925,6 +2883,7 @@ def get_rule_unique_key(lg: dict) -> str:
         return str(lg)
     if lg.get("id"):
         return f"ID:{lg['id']}"
+    # Usar todos los campos de texto de la regla para que ninguna regla nueva se pierda ni se pise
     parts = [
         str(lg.get("title") or lg.get("header") or lg.get("tag") or ""),
         str(lg.get("clubCode") or lg.get("club") or lg.get("team") or ""),
@@ -2941,53 +2900,40 @@ def get_rule_unique_key(lg: dict) -> str:
 
 
 def write_physical_vault(tickets: list, learning_logs: list) -> dict:
-    """Guarda el Checkpoint en beats_history_vault.json respetando ocultos, verificados y nuevas entradas."""
+    """Une los tickets antiguos y nuevos respetando verificaciones, y anexa todas las reglas nuevas."""
     current = read_physical_vault()
     existing_tickets = current.get("tickets", [])
     existing_logs = current.get("learningLogs", [])
 
+    # 1. Fusionar Tickets (antiguos + nuevos, respetando siempre los ya verificados)
     ticket_map = {}
-    ticket_order = []
-
-    # Primero registrar el orden de los entrantes (para que los nuevos Beats queden siempre arriba)
-    for tk in (tickets or []):
-        if isinstance(tk, dict):
-            tk_id = str(tk.get("id") or "")
-            if not tk_id:
-                continue
-            if tk_id not in ticket_map:
-                ticket_order.append(tk_id)
-                ticket_map[tk_id] = tk
-            else:
-                ticket_map[tk_id] = merge_single_ticket(ticket_map[tk_id], tk)
-
-    # Luego fusionar con los que ya existían en disco sin perder ninguno
     for tk in existing_tickets:
-        if isinstance(tk, dict):
-            tk_id = str(tk.get("id") or "")
-            if not tk_id:
-                continue
-            if tk_id not in ticket_map:
-                ticket_order.append(tk_id)
+        if isinstance(tk, dict) and tk.get("id"):
+            ticket_map[str(tk["id"])] = tk
+
+    for tk in (tickets or []):
+        if isinstance(tk, dict) and tk.get("id"):
+            tk_id = str(tk["id"])
+            if tk_id in ticket_map:
+                ticket_map[tk_id] = merge_single_ticket(ticket_map[tk_id], tk)
+            else:
                 ticket_map[tk_id] = tk
-            else:
-                ticket_map[tk_id] = merge_single_ticket(tk, ticket_map[tk_id])
 
-    merged_tickets = [ticket_map[k] for k in ticket_order]
+    merged_tickets = list(ticket_map.values())
+    # Ordenar del más reciente al más antiguo manteniendo el flujo
+    merged_tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
 
-    # Fusionar Reglas de Aprendizaje (2,202 base + todas las nuevas)
+    # 2. Fusionar Reglas de Aprendizaje (las 2,199 base + todas las nuevas anexadas)
     log_map = {}
-    log_order = []
-    for lg in (learning_logs or []) + existing_logs:
+    for lg in existing_logs:
         if isinstance(lg, dict):
-            k = get_rule_unique_key(lg)
-            if k not in log_map:
-                log_order.append(k)
-                log_map[k] = lg
-            else:
-                log_map[k] = {**log_map[k], **lg}
+            log_map[get_rule_unique_key(lg)] = lg
 
-    merged_logs = [log_map[k] for k in log_order]
+    for lg in (learning_logs or []):
+        if isinstance(lg, dict):
+            log_map[get_rule_unique_key(lg)] = lg
+
+    merged_logs = list(log_map.values())
 
     vault_payload = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -3002,7 +2948,7 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
 
     return vault_payload
 
-
+# Crear/verificar el archivo físico apenas arranque el backend
 read_physical_vault()
 
 
@@ -3021,6 +2967,9 @@ async def sync_history(payload: dict):
     incoming_tickets = payload.get("tickets", [])
     incoming_logs = payload.get("learningLogs", [])
     saved_vault = write_physical_vault(incoming_tickets, incoming_logs)
+    print(
+        f"[AUTO-SAVE FÍSICO] {len(saved_vault['tickets'])} tickets y {len(saved_vault['learningLogs'])} reglas en {VAULT_FILE}"
+    )
     return {
         "ok": True,
         "tickets": saved_vault["tickets"],

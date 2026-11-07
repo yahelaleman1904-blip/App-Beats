@@ -36,11 +36,7 @@ const API_BASE_URL = (
   .replace(/\s+/g, '')
   .replace(/\/+$/, '');
 
-// LLAVE ÚNICA DE CHECKPOINT (Evita saturar los 5MB de localStorage del teléfono)
-const MASTER_TICKETS_KEY = 'draftea_checkpoint_tickets_v2';
-const MASTER_LOGS_KEY = 'draftea_checkpoint_logs_v2';
-
-const LEGACY_TICKET_KEYS = [
+const TICKET_STORAGE_KEYS = [
   'draftea_history_vault',
   'beats_history_vault',
   'historyVault',
@@ -50,7 +46,7 @@ const LEGACY_TICKET_KEYS = [
   'savedTickets'
 ];
 
-const LEGACY_LOG_KEYS = [
+const LOG_STORAGE_KEYS = [
   'draftea_learning_logs',
   'beats_learning_logs',
   'learningLogs',
@@ -59,7 +55,7 @@ const LEGACY_LOG_KEYS = [
   'aiLearningRules'
 ];
 
-// Extrae semillas estáticas de src/data/historyData.js solo si la bóveda está completamente vacía
+// Extrae semillas estáticas de src/data/historyData.js si existen en el proyecto
 function getStaticSeedData(type) {
   try {
     if (!HistorySeedModule) return [];
@@ -99,20 +95,7 @@ function getStaticSeedData(type) {
   return [];
 }
 
-// Genera un ID determinístico para cualquier ticket (incluso antiguos que no tuvieran id fijo)
-function getTicketStableId(tk) {
-  if (!tk || typeof tk !== 'object') return '';
-  if (tk.id) return String(tk.id);
-  if (tk.ticketId) return String(tk.ticketId);
-  const legSig = Array.isArray(tk.legs)
-    ? tk.legs
-        .map((l) => `${l?.matchId || l?.matchup || ''}:${l?.selection || l?.prop || ''}`)
-        .join('_')
-    : '';
-  return `tk_${tk.createdAt || tk.date || 'nodate'}_${tk.totalOdd || ''}_${legSig}`;
-}
-
-// Huella única universal para cada regla (sin depender de índices para que nunca se pierdan al recargar)
+// Huella única universal para cada regla (captura cualquier formato de regla para que NUNCA se borren al recargar)
 function getRuleSignature(lg) {
   if (!lg || typeof lg !== 'object') return '';
   if (lg.id) return `ID:${String(lg.id)}`;
@@ -122,7 +105,7 @@ function getRuleSignature(lg) {
     lg.clubCode || lg.club || lg.team || '',
     lg.marketType || lg.market || lg.prop || '',
     lg.selection || lg.pick || '',
-    lg.rule || lg.description || lg.text || lg.note || lg.get || lg.message || '',
+    lg.rule || lg.description || lg.text || lg.note || lg.message || '',
     lg.source || lg.ticketName || lg.matchup || '',
     lg.outcome !== undefined ? String(lg.outcome) : '',
     lg.hit !== undefined ? String(lg.hit) : ''
@@ -140,38 +123,21 @@ function getRuleSignature(lg) {
   }
 }
 
-// Une dos versiones del mismo ticket respetando SIEMPRE el último Checkpoint de oculto y verificación
+// Une dos versiones del mismo ticket conservando SIEMPRE los legs verificados y el estado oculto/archivado
 function mergeTwoTickets(oldTk, newTk) {
   if (!oldTk) return newTk;
   if (!newTk) return oldTk;
 
+  // Determinar cuál versión tiene el cambio de estado más reciente (por ejemplo, si el usuario lo ocultó)
   const oldTime = Number(oldTk._lastModified || 0);
   const newTime = Number(newTk._lastModified || 0);
   const base = newTime >= oldTime ? { ...oldTk, ...newTk } : { ...newTk, ...oldTk };
 
-  // Respetar estrictamente la acción más reciente de Ocultar o Mostrar (archived / hidden)
-  const oldArchTime = Number(oldTk._archivedUpdatedAt || oldTime || 0);
-  const newArchTime = Number(newTk._archivedUpdatedAt || newTime || 0);
-
-  if (newArchTime > oldArchTime) {
-    base.archived = Boolean(newTk.archived);
-    if (newTk.hidden !== undefined) base.hidden = Boolean(newTk.hidden);
-    base._archivedUpdatedAt = newArchTime;
-  } else if (oldArchTime > newArchTime) {
-    base.archived = Boolean(oldTk.archived);
-    if (oldTk.hidden !== undefined) base.hidden = Boolean(oldTk.hidden);
-    base._archivedUpdatedAt = oldArchTime;
-  } else {
-    // Si tienen la misma marca de tiempo, respetar el segundo argumento (newTk) si define archived explícitamente
-    if (typeof newTk.archived === 'boolean') {
-      base.archived = newTk.archived;
-    } else if (typeof oldTk.archived === 'boolean') {
-      base.archived = oldTk.archived;
-    }
+  // Si en cualquiera de las dos versiones tenía bandera de oculto/archivado y no hay marca explícita más nueva desocultándolo, conservarlo
+  if (oldTime === newTime) {
+    if (oldTk.archived === true || newTk.archived === true) base.archived = true;
+    if (oldTk.hidden === true || newTk.hidden === true) base.hidden = true;
   }
-
-  base._lastModified = Math.max(oldTime, newTime);
-  base.id = getTicketStableId(base);
 
   const oldLegs = Array.isArray(oldTk.legs) ? oldTk.legs : [];
   const newLegs = Array.isArray(newTk.legs) ? newTk.legs : [];
@@ -181,7 +147,7 @@ function mergeTwoTickets(oldTk, newTk) {
       const oLeg = oldLegs[idx] || {};
       const comb = newTime >= oldTime ? { ...oLeg, ...nLeg } : { ...nLeg, ...oLeg };
 
-      // REGLA DE ORO: Si un partido ya fue verificado (hit === true o false), NUNCA regresa a null ("En Curso")
+      // REGLA DE ORO: Si un partido ya fue calificado (hit === true o hit === false), NUNCA permitir que un null lo desmarque
       const nHasHit = nLeg && (nLeg.hit === true || nLeg.hit === false);
       const oHasHit = oLeg && (oLeg.hit === true || oLeg.hit === false);
 
@@ -190,13 +156,11 @@ function mergeTwoTickets(oldTk, newTk) {
         if (oLeg.actualResult !== undefined) comb.actualResult = oLeg.actualResult;
         if (oLeg.finalScore !== undefined) comb.finalScore = oLeg.finalScore;
         if (oLeg.statValue !== undefined) comb.statValue = oLeg.statValue;
-        if (oLeg.statusText !== undefined) comb.statusText = oLeg.statusText;
       } else if (nHasHit && !oHasHit) {
         comb.hit = nLeg.hit;
         if (nLeg.actualResult !== undefined) comb.actualResult = nLeg.actualResult;
         if (nLeg.finalScore !== undefined) comb.finalScore = nLeg.finalScore;
         if (nLeg.statValue !== undefined) comb.statValue = nLeg.statValue;
-        if (nLeg.statusText !== undefined) comb.statusText = nLeg.statusText;
       }
 
       if (oLeg.isVoid || nLeg.isVoid) {
@@ -222,7 +186,7 @@ function mergeTwoTickets(oldTk, newTk) {
   return base;
 }
 
-// Une listas de tickets manteniendo el orden (los recién creados arriba) y sin perder verificaciones ni ocultos
+// Une listas de tickets sin perder ninguno (CORREGIDO const order = [])
 function mergeTicketLists(listA = [], listB = []) {
   const map = new Map();
   const order = [];
@@ -230,24 +194,27 @@ function mergeTicketLists(listA = [], listB = []) {
   const safeA = Array.isArray(listA) ? listA : [];
   const safeB = Array.isArray(listB) ? listB : [];
 
-  [...safeA, ...safeB].forEach((tk) => {
+  [...safeA, ...safeB].forEach((tk, idx) => {
     if (!tk || typeof tk !== 'object') return;
-    const key = getTicketStableId(tk);
-    if (!key) return;
-    const normalizedTk = { ...tk, id: key };
+    const legSig = Array.isArray(tk.legs)
+      ? tk.legs
+          .map((l) => `${l?.matchId || l?.matchup || ''}:${l?.selection || l?.prop || ''}`)
+          .join('_')
+      : '';
+    const key = String(tk.id || tk.ticketId || `${tk.createdAt || tk.date || ''}_${legSig}` || `tk-${idx}`);
 
     if (!map.has(key)) {
       order.push(key);
-      map.set(key, normalizedTk);
+      map.set(key, tk);
     } else {
-      map.set(key, mergeTwoTickets(map.get(key), normalizedTk));
+      map.set(key, mergeTwoTickets(map.get(key), tk));
     }
   });
 
   return order.map((k) => map.get(k));
 }
 
-// Une listas de reglas conservando todas las reglas nuevas + las 2,202 anteriores
+// Une listas de reglas conservando las 2,199 base + todas las nuevas verificadas
 function mergeRuleLists(listA = [], listB = []) {
   const map = new Map();
   const order = [];
@@ -270,76 +237,16 @@ function mergeRuleLists(listA = [], listB = []) {
   return order.map((k) => map.get(k));
 }
 
-// Guarda el Checkpoint liberando espacio de llaves duplicadas viejas para que NUNCA falle por QuotaExceededError
-function saveMasterCheckpointToLocal(tickets, logs) {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-
-  // 1. Guardar Tickets en la llave maestra
-  if (Array.isArray(tickets) && tickets.length > 0) {
-    const serializedTk = JSON.stringify(tickets);
-    try {
-      window.localStorage.setItem(MASTER_TICKETS_KEY, serializedTk);
-      // Limpiar llaves duplicadas viejas para liberar megabytes en el celular
-      LEGACY_TICKET_KEYS.forEach((oldKey) => {
-        window.localStorage.removeItem(oldKey);
-      });
-    } catch (quotaErr) {
-      // Si estaba lleno por llaves viejas, limpiar primero y volver a guardar
-      LEGACY_TICKET_KEYS.forEach((oldKey) => window.localStorage.removeItem(oldKey));
-      LEGACY_LOG_KEYS.forEach((oldKey) => window.localStorage.removeItem(oldKey));
-      try {
-        window.localStorage.setItem(MASTER_TICKETS_KEY, serializedTk);
-      } catch (e2) {
-        console.error('Error crítico guardando tickets en Checkpoint:', e2);
-      }
-    }
-  }
-
-  // 2. Guardar Reglas en la llave maestra
-  if (Array.isArray(logs) && logs.length > 0) {
-    const serializedLg = JSON.stringify(logs);
-    try {
-      window.localStorage.setItem(MASTER_LOGS_KEY, serializedLg);
-      LEGACY_LOG_KEYS.forEach((oldKey) => {
-        window.localStorage.removeItem(oldKey);
-      });
-    } catch (quotaErr) {
-      LEGACY_LOG_KEYS.forEach((oldKey) => window.localStorage.removeItem(oldKey));
-      try {
-        window.localStorage.setItem(MASTER_LOGS_KEY, serializedLg);
-      } catch (e2) {
-        console.error('Error crítico guardando reglas en Checkpoint:', e2);
-      }
-    }
-  }
-}
-
-// Lee el último Checkpoint guardado (y si es la primera vez, rescata y migra las llaves antiguas)
-function readMasterCheckpointFromLocal(type) {
+// Lee y UNE todas las llaves locales + semillas para rescatar los +150 Beats y todas las reglas
+function safeReadLocalVault(type) {
   const seedItems = getStaticSeedData(type);
   if (typeof window === 'undefined' || !window.localStorage) return seedItems;
 
   try {
-    const masterKey = type === 'tickets' ? MASTER_TICKETS_KEY : MASTER_LOGS_KEY;
-    const legacyKeys = type === 'tickets' ? LEGACY_TICKET_KEYS : LEGACY_LOG_KEYS;
+    const knownKeys = type === 'tickets' ? TICKET_STORAGE_KEYS : LOG_STORAGE_KEYS;
+    let combined = [...seedItems];
 
-    let combined = [];
-
-    // 1. Leer primero la llave maestra de Checkpoint (la más reciente)
-    const masterRaw = window.localStorage.getItem(masterKey);
-    if (masterRaw) {
-      try {
-        const parsedMaster = JSON.parse(masterRaw);
-        if (Array.isArray(parsedMaster) && parsedMaster.length > 0) {
-          combined = parsedMaster;
-        }
-      } catch (e) {
-        // continuar
-      }
-    }
-
-    // 2. Rescatar cualquier dato de las llaves antiguas si aún existieran
-    for (const key of legacyKeys) {
+    for (const key of knownKeys) {
       const raw = window.localStorage.getItem(key);
       if (!raw) continue;
       try {
@@ -353,10 +260,9 @@ function readMasterCheckpointFromLocal(type) {
           else if (type === 'learningLogs' && Array.isArray(parsed.rules)) arr = parsed.rules;
         }
         if (arr.length > 0) {
-          // Ponemos combined (maestra) al final para que su estado más reciente mande sobre las copias viejas
           combined =
             type === 'tickets'
-              ? mergeTicketLists(arr, combined)
+              ? mergeTicketLists(combined, arr)
               : mergeRuleLists(combined, arr);
         }
       } catch (e) {
@@ -364,18 +270,88 @@ function readMasterCheckpointFromLocal(type) {
       }
     }
 
-    // 3. Si había semillas iniciales, unirlas dando prioridad absoluta a lo guardado en el Checkpoint
-    if (seedItems.length > 0) {
-      combined =
-        type === 'tickets'
-          ? mergeTicketLists(seedItems, combined)
-          : mergeRuleLists(combined, seedItems);
+    // Escaneo completo de cualquier otra llave en localStorage donde estén alojados tickets o reglas
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k || knownKeys.includes(k)) continue;
+      const raw = window.localStorage.getItem(k);
+      if (!raw || (raw[0] !== '[' && raw[0] !== '{')) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const sample = parsed[0];
+          if (
+            type === 'tickets' &&
+            sample &&
+            typeof sample === 'object' &&
+            (Array.isArray(sample.legs) || sample.tier || sample.totalOdd)
+          ) {
+            combined = mergeTicketLists(combined, parsed);
+          } else if (
+            type === 'learningLogs' &&
+            sample &&
+            typeof sample === 'object' &&
+            !Array.isArray(sample.legs) &&
+            (sample.rule ||
+              sample.marketType ||
+              sample.outcome ||
+              sample.tag ||
+              sample.title ||
+              sample.description ||
+              sample.clubCode)
+          ) {
+            combined = mergeRuleLists(combined, parsed);
+          }
+        } else if (parsed && typeof parsed === 'object') {
+          if (type === 'tickets' && Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
+            combined = mergeTicketLists(combined, parsed.tickets);
+          }
+          if (
+            type === 'learningLogs' &&
+            Array.isArray(parsed.learningLogs) &&
+            parsed.learningLogs.length > 0
+          ) {
+            combined = mergeRuleLists(combined, parsed.learningLogs);
+          }
+        }
+      } catch (e) {
+        // continuar
+      }
     }
 
     return combined;
   } catch (err) {
-    console.error('Error leyendo Checkpoint local:', err);
+    console.error('Error leyendo localStorage:', err);
     return seedItems;
+  }
+}
+
+// Escribe de forma atómica en todas las llaves de localStorage para que al recargar jamás regrese a un estado anterior
+function persistToLocalStorage(tickets, logs) {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    if (Array.isArray(tickets) && tickets.length > 0) {
+      const serializedTk = JSON.stringify(tickets);
+      window.localStorage.setItem('draftea_history_vault', serializedTk);
+      window.localStorage.setItem('beats_history_vault', serializedTk);
+      TICKET_STORAGE_KEYS.forEach((k) => {
+        if (window.localStorage.getItem(k) !== null) {
+          window.localStorage.setItem(k, serializedTk);
+        }
+      });
+    }
+    if (Array.isArray(logs) && logs.length > 0) {
+      const serializedLg = JSON.stringify(logs);
+      window.localStorage.setItem('draftea_learning_logs', serializedLg);
+      window.localStorage.setItem('beats_learning_logs', serializedLg);
+      LOG_STORAGE_KEYS.forEach((k) => {
+        if (window.localStorage.getItem(k) !== null) {
+          window.localStorage.setItem(k, serializedLg);
+        }
+      });
+    }
+  } catch (e) {
+    console.error('Error escribiendo en localStorage:', e);
   }
 }
 
@@ -392,17 +368,14 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState('ALL');
   const [selectedFavTeams, setSelectedFavTeams] = useState([]);
 
-  // Estados de Beats y Bóveda de Historial inicializados desde el Checkpoint Maestro
+  // Estados de Beats y Bóveda de Historial (rescatados al instante antes del primer render)
   const [selectedMatchIds, setSelectedMatchIds] = useState([]);
-  const [historyVault, setHistoryVault] = useState(() => readMasterCheckpointFromLocal('tickets'));
-  const [learningLogs, setLearningLogs] = useState(() => readMasterCheckpointFromLocal('learningLogs'));
+  const [historyVault, setHistoryVault] = useState(() => safeReadLocalVault('tickets'));
+  const [learningLogs, setLearningLogs] = useState(() => safeReadLocalVault('learningLogs'));
   const [isVerifying, setIsVerifying] = useState(false);
 
   const ticketsRef = useRef(historyVault);
   const logsRef = useRef(learningLogs);
-  // Contador de mutación local: evita que respuestas viejas de red pisen cambios que el usuario acaba de hacer
-  const mutationVersionRef = useRef(0);
-  const syncTimerRef = useRef(null);
 
   useEffect(() => {
     ticketsRef.current = historyVault;
@@ -411,11 +384,6 @@ export default function App() {
   useEffect(() => {
     logsRef.current = learningLogs;
   }, [learningLogs]);
-
-  // Al arrancar por primera vez, compactar el Checkpoint en localStorage para liberar las llaves duplicadas
-  useEffect(() => {
-    saveMasterCheckpointToLocal(ticketsRef.current, logsRef.current);
-  }, []);
 
   // 1. Cargar cartelera global desde el backend
   const fetchLiveMatches = useCallback(async (force = false) => {
@@ -497,64 +465,49 @@ export default function App() {
     [deepDataMap]
   );
 
-  // 3. FUNCIÓN MAESTRA DE CHECKPOINT: Guarda al instante en teléfono y sincroniza con el backend sin condiciones de carrera
-  const commitCheckpoint = useCallback((nextTickets, nextLogs, immediateSync = false) => {
-    mutationVersionRef.current += 1;
-    const currentVersion = mutationVersionRef.current;
+  // 3. Guardado físico y local unificado (une lo que hay en memoria + lo nuevo y lo graba en localStorage y Backend)
+  const saveHistoryToBackend = useCallback(async (incomingTickets, incomingLogs) => {
+    const mergedTk = mergeTicketLists(incomingTickets, ticketsRef.current);
+    const mergedLg = mergeRuleLists(logsRef.current, incomingLogs);
 
-    ticketsRef.current = nextTickets;
-    logsRef.current = nextLogs;
-    setHistoryVault(nextTickets);
-    setLearningLogs(nextLogs);
+    ticketsRef.current = mergedTk;
+    logsRef.current = mergedLg;
+    setHistoryVault(mergedTk);
+    setLearningLogs(mergedLg);
+    persistToLocalStorage(mergedTk, mergedLg);
 
-    // Guardado físico instantáneo en el teléfono
-    saveMasterCheckpointToLocal(nextTickets, nextLogs);
+    if (mergedTk.length === 0 && mergedLg.length === 0) return;
 
-    if (nextTickets.length === 0 && nextLogs.length === 0) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/history/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tickets: mergedTk,
+          learningLogs: mergedLg
+        })
+      });
+      const data = await res.json();
+      if (data && data.ok) {
+        // Unir dando prioridad al estado local recién modificado (mergeTicketLists(servidor, local))
+        const syncedTk = mergeTicketLists(data.tickets || [], mergedTk);
+        const syncedLg = mergeRuleLists(data.learningLogs || [], mergedLg);
 
-    const performBackendSync = async () => {
-      try {
-        const res = await fetch(`${API_BASE_URL}/api/history/sync`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tickets: ticketsRef.current,
-            learningLogs: logsRef.current
-          })
-        });
-        const data = await res.json();
-        // Solo fusionar respuesta del servidor si el usuario NO hizo otro clic mientras viajaba la petición
-        if (data && data.ok && mutationVersionRef.current === currentVersion) {
-          const syncedTk = mergeTicketLists(data.tickets || [], ticketsRef.current);
-          const syncedLg = mergeRuleLists(logsRef.current, data.learningLogs || []);
-          ticketsRef.current = syncedTk;
-          logsRef.current = syncedLg;
-          setHistoryVault(syncedTk);
-          setLearningLogs(syncedLg);
-          saveMasterCheckpointToLocal(syncedTk, syncedLg);
-        }
-      } catch (err) {
-        console.error('Error sincronizando Checkpoint con el backend:', err);
+        ticketsRef.current = syncedTk;
+        logsRef.current = syncedLg;
+        setHistoryVault(syncedTk);
+        setLearningLogs(syncedLg);
+        persistToLocalStorage(syncedTk, syncedLg);
       }
-    };
-
-    if (syncTimerRef.current) {
-      clearTimeout(syncTimerRef.current);
-    }
-
-    if (immediateSync) {
-      performBackendSync();
-    } else {
-      // Agrupa múltiples clics rápidos (ej. ocultar 55 Beats seguidos) en un solo envío limpio
-      syncTimerRef.current = setTimeout(performBackendSync, 600);
+    } catch (err) {
+      console.error('Error sincronizando historial físico:', err);
     }
   }, []);
 
-  // 4. Cargar y fusionar al abrir la app (dando siempre prioridad al Checkpoint local del usuario)
+  // 4. Cargar y fusionar al iniciar (sin que el servidor pise jamás lo que ya verificaste u ocultaste en el teléfono)
   const fetchHistory = useCallback(async () => {
-    const versionAtStart = mutationVersionRef.current;
-    const localTickets = readMasterCheckpointFromLocal('tickets');
-    const localLogs = readMasterCheckpointFromLocal('learningLogs');
+    const localTickets = safeReadLocalVault('tickets');
+    const localLogs = safeReadLocalVault('learningLogs');
 
     if (localTickets.length > 0) {
       ticketsRef.current = localTickets;
@@ -568,22 +521,18 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE_URL}/api/history`, { cache: 'no-store' });
       const data = await res.json();
-
-      // Si el usuario ya creó un Beat u ocultó algo mientras cargaba, no interrumpirlo
-      if (mutationVersionRef.current !== versionAtStart) return;
-
       const remoteTickets = Array.isArray(data.tickets) ? data.tickets : [];
       const remoteLogs = Array.isArray(data.learningLogs) ? data.learningLogs : [];
 
-      // localTickets va primero en orden (para mantener los nuevos Beats arriba) y además gana en mergeTwoTickets por _lastModified
-      const mergedTickets = mergeTicketLists(localTickets, remoteTickets);
-      const mergedLogs = mergeRuleLists(localLogs, remoteLogs);
+      // Ponemos remoteTickets primero y localTickets segundo para que en cualquier conflicto gane tu estado local verificado/oculto
+      const mergedTickets = mergeTicketLists(remoteTickets, localTickets);
+      const mergedLogs = mergeRuleLists(remoteLogs, localLogs);
 
       ticketsRef.current = mergedTickets;
       logsRef.current = mergedLogs;
       setHistoryVault(mergedTickets);
       setLearningLogs(mergedLogs);
-      saveMasterCheckpointToLocal(mergedTickets, mergedLogs);
+      persistToLocalStorage(mergedTickets, mergedLogs);
 
       if (mergedTickets.length > 0 || mergedLogs.length > 0) {
         await fetch(`${API_BASE_URL}/api/history/sync`, {
@@ -596,7 +545,7 @@ export default function App() {
         });
       }
     } catch (err) {
-      console.error('Error cargando historial remoto, usando Checkpoint local:', err);
+      console.error('Error cargando historial:', err);
     }
   }, []);
 
@@ -604,108 +553,81 @@ export default function App() {
     fetchHistory();
   }, [fetchHistory]);
 
-  // CHECKPOINT 1: Crear / Guardar una nueva predicción (Beat) -> Se queda fija arriba y guarda Checkpoint inmediato
-  const handleSaveTicketToHistory = useCallback(
-    (ticketObj) => {
-      const nowTs = Date.now();
-      const stableId =
-        ticketObj.id || `beat-${nowTs}-${Math.random().toString(36).slice(2, 7)}`;
-      const newTicket = {
-        ...ticketObj,
-        id: String(stableId),
-        archived: Boolean(ticketObj.archived),
-        _lastModified: nowTs,
-        _archivedUpdatedAt: nowTs
-      };
+  // Guardar un Beat recién creado o subido (con sello de tiempo y guardado inmediato)
+  const handleSaveTicketToHistory = (ticketObj) => {
+    const stampedTicket = {
+      ...ticketObj,
+      id: ticketObj.id || `tk-${Date.now()}`,
+      _lastModified: Date.now()
+    };
+    const updated = mergeTicketLists([stampedTicket], ticketsRef.current);
+    saveHistoryToBackend(updated, logsRef.current);
+  };
 
-      // Poner la nueva predicción al principio de la lista y guardar Checkpoint inmediato
-      const updatedTickets = mergeTicketLists([newTicket], ticketsRef.current);
-      commitCheckpoint(updatedTickets, logsRef.current, true);
-    },
-    [commitCheckpoint]
-  );
-
-  // CHECKPOINT 2: Cambiar resultado manual de un partido dentro de un Beat
-  const handleToggleLegResult = useCallback(
-    (ticketId, legIdx) => {
-      const nowTs = Date.now();
-      const targetId = String(ticketId);
-      const updatedTickets = ticketsRef.current.map((tk) => {
-        if (String(getTicketStableId(tk)) !== targetId) return tk;
-        const newLegs = (tk.legs || []).map((leg, idx) => {
-          if (idx !== legIdx) return leg;
-          const nextHit = leg.hit === true ? false : leg.hit === false ? null : true;
-          return { ...leg, hit: nextHit };
-        });
-        const allDone =
-          newLegs.length > 0 &&
-          newLegs.every((l) => l.isVoid || l.hit === true || l.hit === false);
-        return {
-          ...tk,
-          id: targetId,
-          legs: newLegs,
-          fullyVerified: allDone,
-          _lastModified: nowTs
-        };
+  // Marcar o cambiar manualmente el resultado de un partido dentro de un Beat
+  const handleToggleLegResult = (ticketId, legIdx) => {
+    const nowTs = Date.now();
+    const updated = ticketsRef.current.map((tk) => {
+      if (tk.id !== ticketId) return tk;
+      const newLegs = (tk.legs || []).map((leg, idx) => {
+        if (idx !== legIdx) return leg;
+        const nextHit = leg.hit === true ? false : leg.hit === false ? null : true;
+        return { ...leg, hit: nextHit };
       });
-
-      commitCheckpoint(updatedTickets, logsRef.current, false);
-    },
-    [commitCheckpoint]
-  );
-
-  // CHECKPOINT 3: Ocultar o Mostrar un Beat (se queda oculto al recargar, y si lo desocultas se queda visible)
-  const handleToggleArchiveTicket = useCallback(
-    (ticketId) => {
-      const nowTs = Date.now();
-      const targetId = String(ticketId);
-      const updatedTickets = ticketsRef.current.map((t) => {
-        if (String(getTicketStableId(t)) !== targetId) return t;
-        const nextArchived = !Boolean(t.archived);
-        return {
-          ...t,
-          id: targetId,
-          archived: nextArchived,
-          hidden: nextArchived,
-          _lastModified: nowTs,
-          _archivedUpdatedAt: nowTs
-        };
-      });
-
-      commitCheckpoint(updatedTickets, logsRef.current, false);
-    },
-    [commitCheckpoint]
-  );
-
-  // CHECKPOINT 4: Agregar regla manual
-  const handleAddCustomLearningRule = useCallback(
-    (ruleObj) => {
-      const withId = {
-        ...ruleObj,
-        id: ruleObj.id || `rule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        createdAt: ruleObj.createdAt || new Date().toISOString()
+      const allDone =
+        newLegs.length > 0 &&
+        newLegs.every((l) => l.isVoid || l.hit === true || l.hit === false);
+      return {
+        ...tk,
+        legs: newLegs,
+        fullyVerified: allDone,
+        _lastModified: nowTs
       };
-      const updatedLogs = mergeRuleLists([withId], logsRef.current);
-      commitCheckpoint(ticketsRef.current, updatedLogs, true);
-    },
-    [commitCheckpoint]
-  );
+    });
 
-  // CHECKPOINT 5: Verificar partidos -> Califica pendientes, anexa nuevas reglas, actualiza % HIT y sella el Checkpoint
-  const handleAutoVerifyTickets = useCallback(async () => {
+    ticketsRef.current = updated;
+    setHistoryVault(updated);
+    persistToLocalStorage(updated, logsRef.current);
+    saveHistoryToBackend(updated, logsRef.current);
+  };
+
+  // Ocultar / Mostrar un Beat (se le pone _lastModified para que al recargar la página se quede oculto siempre)
+  const handleToggleArchiveTicket = (ticketId) => {
+    const nowTs = Date.now();
+    const updated = ticketsRef.current.map((t) =>
+      t.id === ticketId
+        ? { ...t, archived: !t.archived, _lastModified: nowTs }
+        : t
+    );
+    ticketsRef.current = updated;
+    setHistoryVault(updated);
+    persistToLocalStorage(updated, logsRef.current);
+    saveHistoryToBackend(updated, logsRef.current);
+  };
+
+  // Agregar nueva regla de ajuste anexándola a las 2,199+ existentes
+  const handleAddCustomLearningRule = (ruleObj) => {
+    const withId = {
+      ...ruleObj,
+      id: ruleObj.id || `rule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: ruleObj.createdAt || new Date().toISOString()
+    };
+    const updatedLogs = mergeRuleLists(logsRef.current, [withId]);
+    saveHistoryToBackend(ticketsRef.current, updatedLogs);
+  };
+
+  // Verificar SOLO los Beats que aún tienen partidos sin calificar (no toca los ya verificados ni desmarca ocultos)
+  const handleAutoVerifyTickets = async () => {
     const currentTickets = ticketsRef.current;
-    if (currentTickets.length === 0 || isVerifying) return;
+    if (currentTickets.length === 0) return;
 
-    // Filtrar únicamente los Beats que todavía tengan al menos un partido pendiente (hit === null o undefined)
     const pendingTickets = currentTickets.filter((tk) => {
       const legs = Array.isArray(tk.legs) ? tk.legs : [];
       if (legs.length === 0) return false;
-      return legs.some((l) => !l.isVoid && l.hit !== true && l.hit !== false);
+      return legs.some((l) => !l.isVoid && (l.hit === null || l.hit === undefined));
     });
 
     if (pendingTickets.length === 0) {
-      // Aunque todos estén ya verificados, sellar Checkpoint por seguridad
-      commitCheckpoint(currentTickets, logsRef.current, true);
       triggerHaptic('success');
       return;
     }
@@ -724,44 +646,35 @@ export default function App() {
       const data = await res.json();
       if (data && data.ok) {
         const nowTs = Date.now();
-
-        // Tomar los tickets verificados por el servidor PERO respetando el estado actual en ticketsRef (por si ocultaste alguno mientras verificaba)
-        const verifiedMap = new Map();
-        (Array.isArray(data.tickets) ? data.tickets : []).forEach((vtk) => {
-          const vid = getTicketStableId(vtk);
-          if (vid) verifiedMap.set(vid, vtk);
-        });
-
-        const updatedTickets = ticketsRef.current.map((currentTk) => {
-          const cid = getTicketStableId(currentTk);
-          const vTk = verifiedMap.get(cid);
-          if (!vTk) return currentTk;
-
-          // Unir conservando los resultados recién verificados de vTk pero respetando el archived actual de currentTk
-          const merged = mergeTwoTickets(currentTk, {
-            ...vTk,
-            id: cid,
-            archived: Boolean(currentTk.archived),
-            hidden: Boolean(currentTk.hidden),
-            _archivedUpdatedAt: currentTk._archivedUpdatedAt || nowTs,
+        const verifiedBatch = (Array.isArray(data.tickets) ? data.tickets : []).map((vtk) => {
+          const orig = currentTickets.find((ct) => String(ct.id) === String(vtk.id));
+          return {
+            ...vtk,
+            // Preservar siempre si el ticket estaba oculto/archivado
+            archived: orig ? orig.archived : vtk.archived,
             _lastModified: nowTs
-          });
-          return merged;
+          };
         });
 
-        // Asignar ID permanente a cada regla nueva generada en esta verificación
+        // Unir los recién verificados con todos los demás tickets
+        const finalTickets = mergeTicketLists(currentTickets, verifiedBatch);
+
+        // Asignar ID estable a cualquier regla nueva devuelta por el backend para que nunca se pierda al recargar
         const incomingRules = (Array.isArray(data.learningLogs) ? data.learningLogs : []).map(
           (r) => ({
             ...r,
             id: r.id || `verified-${getRuleSignature(r)}`
           })
         );
+        const finalLogs = mergeRuleLists(logsRef.current, incomingRules);
 
-        // Poner las reglas nuevas al principio y conservar las 2,202+ existentes
-        const updatedLogs = mergeRuleLists(incomingRules, logsRef.current);
+        ticketsRef.current = finalTickets;
+        logsRef.current = finalLogs;
+        setHistoryVault(finalTickets);
+        setLearningLogs(finalLogs);
+        persistToLocalStorage(finalTickets, finalLogs);
 
-        // GUARDAR CHECKPOINT DEFINITIVO DE VERIFICACIÓN (Local + Backend)
-        commitCheckpoint(updatedTickets, updatedLogs, true);
+        await saveHistoryToBackend(finalTickets, finalLogs);
         triggerHaptic('success');
       }
     } catch (err) {
@@ -769,7 +682,7 @@ export default function App() {
     } finally {
       setIsVerifying(false);
     }
-  }, [commitCheckpoint, isVerifying]);
+  };
 
   // 5. Generar dinámicamente las píldoras de fecha
   const datePills = useMemo(() => {
@@ -800,7 +713,7 @@ export default function App() {
     return out;
   }, []);
 
-  // 6. Calcular % de efectividad global (siempre persiste el % HIT de todos los Beats verificados, visibles u ocultos)
+  // 6. Calcular % de efectividad global (incluye todos los Beats verificados, estén visibles u ocultos)
   const hitRateStats = useMemo(() => {
     let totalSettled = 0;
     let totalHits = 0;
@@ -873,6 +786,7 @@ export default function App() {
     setSelectedDate('ALL');
     setSelectedFavTeams([]);
     fetchLiveMatches(true);
+    fetchHistory();
   };
 
   const handleApplyPresetFilters = (leaguesArr, teamsArr) => {

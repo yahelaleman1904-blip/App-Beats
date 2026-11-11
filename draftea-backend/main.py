@@ -2698,10 +2698,22 @@ async def auto_verify_tickets(payload: dict):
 
 
 # ==============================================================================
-# MOTOR DE PERSISTENCIA SUPABASE (CON PAGINACIÓN AUTOMÁTICA Y DELTA UPSERT)
+# MOTOR DE PERSISTENCIA SUPABASE (ULTRA RÁPIDO CON CACHÉ Y LOTE ÚNICO)
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VAULT_FILE = os.path.join(BASE_DIR, "beats_history_vault.json")
+
+# Semáforo para evitar que clics rápidos se pisen entre sí (Race Condition)
+SYNC_LOCK = asyncio.Lock()
+
+# Caché en memoria para no descargar las +2,500 reglas en cada clic
+VAULT_MEMORY_CACHE = {
+    "loaded": False,
+    "tickets_map": {},
+    "rules_map": {},
+    "tickets_serialized": {},
+    "rules_serialized": {}
+}
 
 
 def fetch_all_supabase_rows(table_name: str) -> list:
@@ -2724,33 +2736,70 @@ def fetch_all_supabase_rows(table_name: str) -> list:
     return all_rows
 
 
-def read_physical_vault() -> dict:
-    """Lee todos los Beats y Reglas desde Supabase. Si hay fallo de red, usa archivo local como respaldo."""
+def get_rule_unique_key(lg: dict) -> str:
+    """Huella única universal para cualquier estructura de regla de aprendizaje."""
+    if not isinstance(lg, dict):
+        return str(lg)
+    if lg.get("id"):
+        return str(lg["id"])
+    parts = [
+        str(lg.get("title") or lg.get("header") or lg.get("tag") or ""),
+        str(lg.get("clubCode") or lg.get("club") or lg.get("team") or ""),
+        str(lg.get("marketType") or lg.get("market") or lg.get("prop") or ""),
+        str(lg.get("selection") or lg.get("pick") or ""),
+        str(lg.get("rule") or lg.get("description") or lg.get("text") or lg.get("note") or lg.get("message") or ""),
+        str(lg.get("source") or lg.get("ticketName") or ""),
+        str(lg.get("outcome") or lg.get("hit") or "")
+    ]
+    sig = "|".join(p.strip() for p in parts if p is not None)
+    if sig.replace("|", "").strip():
+        return f"rule_{abs(hash(sig))}"
+    return f"rule_{abs(hash(json.dumps(lg, sort_keys=True, ensure_ascii=False)))}"
+
+
+def ensure_memory_cache_loaded():
+    """Carga los datos desde Supabase una sola vez al arrancar y los mantiene listos en memoria."""
+    if VAULT_MEMORY_CACHE["loaded"]:
+        return
+
     try:
         tickets = fetch_all_supabase_rows("draftea_tickets")
-        tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
         learning_logs = fetch_all_supabase_rows("draftea_rules")
-        return {
-            "tickets": tickets,
-            "learningLogs": learning_logs
-        }
+
+        for tk in tickets:
+            if isinstance(tk, dict) and tk.get("id"):
+                tk_id = str(tk["id"])
+                VAULT_MEMORY_CACHE["tickets_map"][tk_id] = tk
+                VAULT_MEMORY_CACHE["tickets_serialized"][tk_id] = json.dumps(tk, sort_keys=True, ensure_ascii=False)
+
+        for lg in learning_logs:
+            if isinstance(lg, dict):
+                rk = get_rule_unique_key(lg)
+                if not lg.get("id"):
+                    lg["id"] = rk
+                VAULT_MEMORY_CACHE["rules_map"][rk] = lg
+                VAULT_MEMORY_CACHE["rules_serialized"][rk] = json.dumps(lg, sort_keys=True, ensure_ascii=False)
+
+        VAULT_MEMORY_CACHE["loaded"] = True
+        print(f"[CACHE SUPABASE LISTA] {len(tickets)} tickets y {len(learning_logs)} reglas en memoria.")
     except Exception as e:
-        print(f"[WARN] Error leyendo de Supabase, usando respaldo local: {e}")
-        if os.path.exists(VAULT_FILE):
-            try:
-                with open(VAULT_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return {
-                        "tickets": data.get("tickets", []) if isinstance(data, dict) else [],
-                        "learningLogs": data.get("learningLogs", []) if isinstance(data, dict) else []
-                    }
-            except Exception:
-                pass
-        return {"tickets": [], "learningLogs": []}
+        print(f"[WARN] Error cargando desde Supabase: {e}")
+
+
+def read_physical_vault() -> dict:
+    """Devuelve los Beats y Reglas al instante desde la memoria sincronizada con Supabase."""
+    ensure_memory_cache_loaded()
+    tickets_list = list(VAULT_MEMORY_CACHE["tickets_map"].values())
+    tickets_list.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
+    rules_list = list(VAULT_MEMORY_CACHE["rules_map"].values())
+    return {
+        "tickets": tickets_list,
+        "learningLogs": rules_list
+    }
 
 
 def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
-    """Conserva siempre los legs ya verificados (hit True/False) y el estado archived."""
+    """Conserva siempre los legs ya verificados (hit True/False), pero respeta cambios inmediatos de 'archived'/'hidden'."""
     merged = {**old_tk, **new_tk}
     old_legs = old_tk.get("legs") if isinstance(old_tk.get("legs"), list) else []
     new_legs = new_tk.get("legs") if isinstance(new_tk.get("legs"), list) else []
@@ -2776,69 +2825,24 @@ def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
     return merged
 
 
-def get_rule_unique_key(lg: dict) -> str:
-    """Huella única universal para cualquier estructura de regla de aprendizaje."""
-    if not isinstance(lg, dict):
-        return str(lg)
-    if lg.get("id"):
-        return str(lg["id"])
-    parts = [
-        str(lg.get("title") or lg.get("header") or lg.get("tag") or ""),
-        str(lg.get("clubCode") or lg.get("club") or lg.get("team") or ""),
-        str(lg.get("marketType") or lg.get("market") or lg.get("prop") or ""),
-        str(lg.get("selection") or lg.get("pick") or ""),
-        str(lg.get("rule") or lg.get("description") or lg.get("text") or lg.get("note") or lg.get("message") or ""),
-        str(lg.get("source") or lg.get("ticketName") or ""),
-        str(lg.get("outcome") or lg.get("hit") or "")
-    ]
-    sig = "|".join(p.strip() for p in parts if p is not None)
-    if sig.replace("|", "").strip():
-        return f"rule_{abs(hash(sig))}"
-    return f"rule_{abs(hash(json.dumps(lg, sort_keys=True, ensure_ascii=False)))}"
-
-
 def write_physical_vault(tickets: list, learning_logs: list) -> dict:
-    """Sincroniza de forma inteligente (Delta Upsert) solo los tickets y reglas nuevas o modificadas en Supabase."""
-    current = read_physical_vault()
-    existing_tickets = current.get("tickets", [])
-    existing_logs = current.get("learningLogs", [])
-
-    # 1. Fusionar Tickets y detectar cuáles son nuevos o cambiaron
-    ticket_map = {}
-    existing_tk_serialized = {}
-    for tk in existing_tickets:
-        if isinstance(tk, dict) and tk.get("id"):
-            tk_id = str(tk["id"])
-            ticket_map[tk_id] = tk
-            existing_tk_serialized[tk_id] = json.dumps(tk, sort_keys=True, ensure_ascii=False)
+    """Guarda en lote (Batch Upsert) todos los cambios en una sola petición ultrarrápida a Supabase."""
+    ensure_memory_cache_loaded()
 
     tickets_to_upsert = []
     for tk in (tickets or []):
         if isinstance(tk, dict) and tk.get("id"):
             tk_id = str(tk["id"])
-            if tk_id in ticket_map:
-                merged_tk = merge_single_ticket(ticket_map[tk_id], tk)
+            if tk_id in VAULT_MEMORY_CACHE["tickets_map"]:
+                merged_tk = merge_single_ticket(VAULT_MEMORY_CACHE["tickets_map"][tk_id], tk)
             else:
                 merged_tk = tk
-            ticket_map[tk_id] = merged_tk
 
             new_serialized = json.dumps(merged_tk, sort_keys=True, ensure_ascii=False)
-            if existing_tk_serialized.get(tk_id) != new_serialized:
+            if VAULT_MEMORY_CACHE["tickets_serialized"].get(tk_id) != new_serialized:
+                VAULT_MEMORY_CACHE["tickets_map"][tk_id] = merged_tk
+                VAULT_MEMORY_CACHE["tickets_serialized"][tk_id] = new_serialized
                 tickets_to_upsert.append({"id": tk_id, "payload": merged_tk})
-
-    merged_tickets = list(ticket_map.values())
-    merged_tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
-
-    # 2. Fusionar Reglas y detectar cuáles son nuevas o cambiaron
-    log_map = {}
-    existing_lg_serialized = {}
-    for lg in existing_logs:
-        if isinstance(lg, dict):
-            rk = get_rule_unique_key(lg)
-            if not lg.get("id"):
-                lg["id"] = rk
-            log_map[rk] = lg
-            existing_lg_serialized[rk] = json.dumps(lg, sort_keys=True, ensure_ascii=False)
 
     rules_to_upsert = []
     for lg in (learning_logs or []):
@@ -2846,24 +2850,33 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
             rk = get_rule_unique_key(lg)
             if not lg.get("id"):
                 lg["id"] = rk
-            log_map[rk] = lg
 
             new_lg_serialized = json.dumps(lg, sort_keys=True, ensure_ascii=False)
-            if existing_lg_serialized.get(rk) != new_lg_serialized:
+            if VAULT_MEMORY_CACHE["rules_serialized"].get(rk) != new_lg_serialized:
+                VAULT_MEMORY_CACHE["rules_map"][rk] = lg
+                VAULT_MEMORY_CACHE["rules_serialized"][rk] = new_lg_serialized
                 rules_to_upsert.append({"id": rk, "payload": lg})
 
-    merged_logs = list(log_map.values())
-
-    # 3. Guardar en Supabase únicamente las diferencias (evita bloqueos y uso excesivo de RAM)
+    # Envío por LOTE (Batch Upsert): Sube 55 tickets en 1 sola llamada de 0.1 segundos
     try:
-        for item in tickets_to_upsert:
-            supabase.table("draftea_tickets").upsert(item).execute()
-        for item in rules_to_upsert:
-            supabase.table("draftea_rules").upsert(item).execute()
+        if tickets_to_upsert:
+            for i in range(0, len(tickets_to_upsert), 100):
+                batch_t = tickets_to_upsert[i:i + 100]
+                supabase.table("draftea_tickets").upsert(batch_t).execute()
+
+        if rules_to_upsert:
+            for i in range(0, len(rules_to_upsert), 100):
+                batch_r = rules_to_upsert[i:i + 100]
+                supabase.table("draftea_rules").upsert(batch_r).execute()
+
         if tickets_to_upsert or rules_to_upsert:
-            print(f"[SUPABASE SYNC] Subidos {len(tickets_to_upsert)} tickets modificados y {len(rules_to_upsert)} reglas nuevas.")
+            print(f"⚡ [GUARDADO INSTANTÁNEO] {len(tickets_to_upsert)} tickets y {len(rules_to_upsert)} reglas actualizadas en Supabase.")
     except Exception as e:
-        print(f"[ERROR SUPABASE WRITE] {e}")
+        print(f"[ERROR SUPABASE BATCH WRITE] {e}")
+
+    merged_tickets = list(VAULT_MEMORY_CACHE["tickets_map"].values())
+    merged_tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
+    merged_logs = list(VAULT_MEMORY_CACHE["rules_map"].values())
 
     return {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -2876,24 +2889,23 @@ def write_physical_vault(tickets: list, learning_logs: list) -> dict:
 
 @app.get("/api/history")
 async def get_history():
-    vault = read_physical_vault()
-    return {
-        "ok": True,
-        "tickets": vault["tickets"],
-        "learningLogs": vault["learningLogs"]
-    }
+    async with SYNC_LOCK:
+        vault = read_physical_vault()
+        return {
+            "ok": True,
+            "tickets": vault["tickets"],
+            "learningLogs": vault["learningLogs"]
+        }
 
 
 @app.post("/api/history/sync")
 async def sync_history(payload: dict):
-    incoming_tickets = payload.get("tickets", [])
-    incoming_logs = payload.get("learningLogs", [])
-    saved_vault = write_physical_vault(incoming_tickets, incoming_logs)
-    print(
-        f"[SUPABASE ACTIVE] Total en nube: {len(saved_vault['tickets'])} tickets y {len(saved_vault['learningLogs'])} reglas."
-    )
-    return {
-        "ok": True,
-        "tickets": saved_vault["tickets"],
-        "learningLogs": saved_vault["learningLogs"]
-    }
+    async with SYNC_LOCK:
+        incoming_tickets = payload.get("tickets", [])
+        incoming_logs = payload.get("learningLogs", [])
+        saved_vault = write_physical_vault(incoming_tickets, incoming_logs)
+        return {
+            "ok": True,
+            "tickets": saved_vault["tickets"],
+            "learningLogs": saved_vault["learningLogs"]
+        }

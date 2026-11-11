@@ -8,10 +8,11 @@ import os
 import re
 import unicodedata
 import httpx
+from supabase import create_client, Client
 
 app = FastAPI(
     title="Draftea Beats AI - Motor Verificado ESPN Multi-Competencia",
-    version="9.0.0"
+    version="9.1.0"
 )
 
 app.add_middleware(
@@ -21,6 +22,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- CONFIGURACIÓN DE SUPABASE ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vwlznsmwisdugpkftenc.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_5zcsjg-ubIcHNyohk5VwCQ_dX2D6Bp1")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 VAULT_FILE = "beats_history_vault.json"
 MEXICO_TZ = timezone(timedelta(hours=-6))
@@ -1242,7 +1249,7 @@ def analyze_team_tactical_style(last5_list, team_name, is_home=True):
 @app.get("/")
 @app.get("/api/health")
 async def health_check():
-    return {"ok": True, "status": "online", "version": "9.0.0"}
+    return {"ok": True, "status": "online", "version": "9.1.0"}
 
 
 @app.get("/api/teams/search")
@@ -1829,124 +1836,6 @@ async def fetch_thesportsdb_fallback_matches(
     urls = [
         f"https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id={tsdb_id}",
         f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s={current_year}",
-        f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s=2025",
-    ]
-
-    yesterday_str = (datetime.now(timezone.utc).astimezone(MEXICO_TZ) - timedelta(days=2)).strftime("%Y-%m-%d")
-
-    for url in urls:
-        try:
-            resp = await client.get(url, headers=HEADERS, timeout=7.0)
-            if resp.status_code != 200:
-                continue
-            events = resp.json().get("events") or []
-            out = []
-
-            for ev in events:
-                if not isinstance(ev, dict):
-                    continue
-                ev_id = str(ev.get("idEvent") or "")
-                date_ev = str(ev.get("dateEvent") or "")
-                status_str = str(ev.get("strStatus") or "").upper()
-                if not ev_id or date_ev < yesterday_str:
-                    continue
-                if any(k in status_str for k in ["POSTPONED", "CANCELED"]):
-                    continue
-
-                time_ev = str(ev.get("strTime") or "12:00:00")[:5]
-                iso_str = f"{date_ev}T{time_ev}:00Z"
-                date_mx, time_mx = convert_utc_to_mexico(iso_str)
-                if date_mx < today_mx_str:
-                    if date_ev >= yesterday_str:
-                        date_mx = today_mx_str
-                    else:
-                        continue
-
-                home_name = ev.get("strHomeTeam") or "Local"
-                away_name = ev.get("strAwayTeam") or "Visitante"
-                raw_h_id = str(ev.get("idHomeTeam") or home_name[:3].upper())
-                raw_a_id = str(ev.get("idAwayTeam") or away_name[:3].upper())
-                raw_h_logo = ev.get("strHomeTeamBadge") or ""
-                raw_a_logo = ev.get("strAwayTeamBadge") or ""
-
-                home_id_str, home_abbr, home_logo = resolve_espn_team_info(
-                    home_name, league_info["slug"], raw_h_id, raw_h_logo
-                )
-                away_id_str, away_abbr, away_logo = resolve_espn_team_info(
-                    away_name, league_info["slug"], raw_a_id, raw_a_logo
-                )
-
-                out.append({
-                    "id": ev_id,
-                    "kickoffUtc": iso_str,
-                    "leagueId": league_id,
-                    "leagueSlug": league_info["slug"],
-                    "leagueName": league_info["name"],
-                    "leagueProfile": league_info["profile"],
-                    "date": date_mx,
-                    "time": time_mx,
-                    "status": "Por Jugar",
-                    "homeTeam": {
-                        "id": home_abbr,
-                        "teamApiId": home_id_str,
-                        "name": home_name,
-                        "short": home_abbr,
-                        "logo": home_logo,
-                        "rank": get_verified_rank(league_info["slug"], None, home_id_str, home_name),
-                        "formation": "4-2-3-1"
-                    },
-                    "awayTeam": {
-                        "id": away_abbr,
-                        "teamApiId": away_id_str,
-                        "name": away_name,
-                        "short": away_abbr,
-                        "logo": away_logo,
-                        "rank": get_verified_rank(league_info["slug"], None, away_id_str, away_name),
-                        "formation": "4-3-3"
-                    },
-                    "aiTopSignal": f"{home_name} vs {away_name}: Goles ↑ 1.5",
-                    "statsL10": {
-                        "over05Goals": 93,
-                        "over15Goals": 84,
-                        "over25Goals": 66,
-                        "btts": 68,
-                        "homeShotsAvg": 13.8,
-                        "awayShotsAvg": 11.6,
-                        "homeSoTAvg": 4.9,
-                        "awaySoTAvg": 4.1,
-                        "cornersAvg": 9.5
-                    },
-                    "keyPlayers": [],
-                    "goalkeepers": [],
-                    "recentMatches": {"home": [], "away": []}
-                })
-
-            if len(out) > 0:
-                out.sort(key=lambda x: (x["date"], x["time"]))
-                return out[:18]
-        except Exception:
-            continue
-
-    return []
-
-
-async def fetch_thesportsdb_fallback_matches(
-    client: httpx.AsyncClient,
-    league_id: str,
-    league_info: dict,
-    today_mx_str: str
-):
-    tsdb_id = THESPORTSDB_LEAGUE_IDS.get(league_id)
-    if not tsdb_id:
-        return []
-
-    await ensure_league_teams_registered(client, league_info["slug"], league_info["name"])
-
-    now_utc = datetime.now(timezone.utc)
-    current_year = today_mx_str[:4]
-    urls = [
-        f"https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id={tsdb_id}",
-        f"https://www.thesportsdb.com/api/v1/json/3/eventsseason.php?id={tsdb_id}&s={current_year}",
     ]
 
     for url in urls:
@@ -1972,8 +1861,6 @@ async def fetch_thesportsdb_fallback_matches(
 
                 time_ev = str(ev.get("strTime") or "12:00:00")[:5]
                 iso_str = f"{date_ev}T{time_ev}:00Z"
-                kickoff_utc = parse_kickoff_utc(iso_str)
-
 
                 date_mx, time_mx = convert_utc_to_mexico(iso_str)
                 if date_mx < today_mx_str:
@@ -2081,18 +1968,15 @@ def parse_espn_scoreboard_events(
             state = str(status_type.get("state") or "").lower()
             completed = bool(status_type.get("completed", False))
 
-            # Solo partidos que NO han iniciado ni terminado
             if completed or state in ["post", "in"]:
                 continue
 
             raw_date_str = str(ev.get("date") or comp.get("date") or "")
             date_mx, time_mx = convert_utc_to_mexico(raw_date_str)
 
-            # Filtrar por fecha y hora de México en texto simple (sin errores de timezone)
             if date_mx < today_mx_str or date_mx > max_future_date:
                 continue
 
-            # Si el partido es HOY en México, verificar que su hora (HH:MM) sea mayor a la hora actual
             match_hm = time_mx[:5]
             if date_mx == today_mx_str and match_hm <= current_hm_mx:
                 continue
@@ -2218,9 +2102,6 @@ async def fetch_league_complete_schedule(
     today_mx_str: str,
     now_utc: datetime
 ):
-    """
-    Descarga el scoreboard general + cada día de la semana para una liga.
-    """
     league_info = LIVE_LEAGUES_MAP.get(league_id)
     if not league_info:
         return []
@@ -2228,12 +2109,10 @@ async def fetch_league_complete_schedule(
     primary_slug = league_info["slug"]
     is_special = league_id in ["MLS", "J1_LEAGUE"]
 
-    # 1. URLs por día exacto (formato nativo de ESPN que nunca trunca partidos)
     urls = [
         f"https://site.api.espn.com/apis/site/v2/sports/soccer/{primary_slug}/scoreboard?dates={d_str}"
         for d_str in day_strings
     ]
-    # 2. Scoreboard general de la liga
     urls.append(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{primary_slug}/scoreboard")
 
     if league_id == "MLS":
@@ -2300,7 +2179,6 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
                 "matches": valid_cached
             }
 
-        # Días individuales desde hoy hasta +7 días (incluye +1 para huso horario de Japón)
         day_strings = [
             (now_mx + timedelta(days=i)).strftime("%Y%m%d")
             for i in range(0, days_ahead + 2)
@@ -2324,7 +2202,6 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
                         for match in batch:
                             unique_map[match["id"]] = match
 
-            # Respaldo oficial TheSportsDB para MLS y J1_LEAGUE
             for special_lg in ["MLS", "J1_LEAGUE"]:
                 has_lg_matches = any(m["leagueId"] == special_lg for m in unique_map.values())
                 if not has_lg_matches and special_lg in LIVE_LEAGUES_MAP:
@@ -2337,7 +2214,6 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
                     except Exception:
                         pass
 
-            # Cargar tablas de posiciones de las ligas con partidos activos
             active_slugs = list({m.get("leagueSlug") for m in unique_map.values() if m.get("leagueSlug")})
             for j in range(0, len(active_slugs), 5):
                 slug_chunk = active_slugs[j : j + 5]
@@ -2374,6 +2250,7 @@ async def fetch_all_leagues_cartelera(days_ahead: int = 7, force_refresh: bool =
             "matches": all_matches
         }
 
+
 @app.post("/api/verify-tickets")
 async def auto_verify_tickets(payload: dict):
     tickets = payload.get("tickets", [])
@@ -2382,7 +2259,6 @@ async def auto_verify_tickets(payload: dict):
 
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         for tk in tickets:
-            # Saltar el ticket completo si ya está verificado al 100%
             if tk.get("fullyVerified") or all(
                 (leg.get("hit") is not None or leg.get("isVoid"))
                 for leg in (tk.get("legs") or [])
@@ -2390,7 +2266,6 @@ async def auto_verify_tickets(payload: dict):
                 continue
 
             for leg in tk.get("legs", []):
-                # Si este partido individual ya fue verificado antes, no volver a revisarlo
                 if leg.get("hit") is not None or leg.get("isVoid"):
                     continue
 
@@ -2810,41 +2685,67 @@ async def auto_verify_tickets(payload: dict):
                             })
                 except Exception:
                     continue
-# Guardar físicamente en beats_history_vault.json apenas termine de verificar los partidos
+
+    # Guardar cambios directamente en Supabase (y respaldo local si aplica)
     saved_vault = write_physical_vault(tickets, learning_logs)
 
     return {
         "ok": True,
         "updated": updated_any,
-        "tickets": tickets,
-        "learningLogs": learning_logs
+        "tickets": saved_vault["tickets"],
+        "learningLogs": saved_vault["learningLogs"]
     }
 
 
-# Ruta física absoluta dentro de la carpeta draftea-backend
+# ==============================================================================
+# MOTOR DE PERSISTENCIA SUPABASE (CON PAGINACIÓN AUTOMÁTICA Y DELTA UPSERT)
+# ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VAULT_FILE = os.path.join(BASE_DIR, "beats_history_vault.json")
 
 
-def read_physical_vault() -> dict:
-    """Lee el archivo físico beats_history_vault.json o lo crea automáticamente al iniciar."""
-    if not os.path.exists(VAULT_FILE):
-        initial_data = {"tickets": [], "learningLogs": []}
-        try:
-            with open(VAULT_FILE, "w", encoding="utf-8") as f:
-                json.dump(initial_data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-        return initial_data
+def fetch_all_supabase_rows(table_name: str) -> list:
+    """Descarga absolutamente todas las filas de una tabla de Supabase paginando de 1000 en 1000."""
+    all_rows = []
+    step = 1000
+    offset = 0
+    while True:
+        res = supabase.table(table_name).select("id, payload").range(offset, offset + step - 1).execute()
+        rows = res.data or []
+        for r in rows:
+            if isinstance(r, dict) and isinstance(r.get("payload"), dict):
+                item = r["payload"]
+                if not item.get("id") and r.get("id"):
+                    item["id"] = r["id"]
+                all_rows.append(item)
+        if len(rows) < step:
+            break
+        offset += step
+    return all_rows
 
+
+def read_physical_vault() -> dict:
+    """Lee todos los Beats y Reglas desde Supabase. Si hay fallo de red, usa archivo local como respaldo."""
     try:
-        with open(VAULT_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {
-                "tickets": data.get("tickets", []) if isinstance(data, dict) else [],
-                "learningLogs": data.get("learningLogs", []) if isinstance(data, dict) else []
-            }
-    except Exception:
+        tickets = fetch_all_supabase_rows("draftea_tickets")
+        tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
+        learning_logs = fetch_all_supabase_rows("draftea_rules")
+        return {
+            "tickets": tickets,
+            "learningLogs": learning_logs
+        }
+    except Exception as e:
+        print(f"[WARN] Error leyendo de Supabase, usando respaldo local: {e}")
+        if os.path.exists(VAULT_FILE):
+            try:
+                with open(VAULT_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return {
+                        "tickets": data.get("tickets", []) if isinstance(data, dict) else [],
+                        "learningLogs": data.get("learningLogs", []) if isinstance(data, dict) else []
+                    }
+            except Exception:
+                pass
         return {"tickets": [], "learningLogs": []}
 
 
@@ -2861,7 +2762,6 @@ def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
                 final_legs.append(n_leg or o_leg)
                 continue
             comb_leg = {**o_leg, **n_leg}
-            # Si ya estaba verificado antes y el entrante viene en None, respetar el ya verificado
             if n_leg.get("hit") is None and o_leg.get("hit") is not None:
                 comb_leg["hit"] = o_leg["hit"]
                 if o_leg.get("actualResult") is not None:
@@ -2869,7 +2769,6 @@ def merge_single_ticket(old_tk: dict, new_tk: dict) -> dict:
             final_legs.append(comb_leg)
         merged["legs"] = final_legs
 
-    # Si todos los legs ya tienen resultado, marcar el ticket como verificado para no re-revisarlo
     legs_check = merged.get("legs") or []
     if len(legs_check) > 0 and all((l.get("hit") is not None or l.get("isVoid")) for l in legs_check):
         merged["fullyVerified"] = True
@@ -2882,8 +2781,7 @@ def get_rule_unique_key(lg: dict) -> str:
     if not isinstance(lg, dict):
         return str(lg)
     if lg.get("id"):
-        return f"ID:{lg['id']}"
-    # Usar todos los campos de texto de la regla para que ninguna regla nueva se pierda ni se pise
+        return str(lg["id"])
     parts = [
         str(lg.get("title") or lg.get("header") or lg.get("tag") or ""),
         str(lg.get("clubCode") or lg.get("club") or lg.get("team") or ""),
@@ -2895,61 +2793,85 @@ def get_rule_unique_key(lg: dict) -> str:
     ]
     sig = "|".join(p.strip() for p in parts if p is not None)
     if sig.replace("|", "").strip():
-        return sig
-    return json.dumps(lg, sort_keys=True, ensure_ascii=False)
+        return f"rule_{abs(hash(sig))}"
+    return f"rule_{abs(hash(json.dumps(lg, sort_keys=True, ensure_ascii=False)))}"
 
 
 def write_physical_vault(tickets: list, learning_logs: list) -> dict:
-    """Une los tickets antiguos y nuevos respetando verificaciones, y anexa todas las reglas nuevas."""
+    """Sincroniza de forma inteligente (Delta Upsert) solo los tickets y reglas nuevas o modificadas en Supabase."""
     current = read_physical_vault()
     existing_tickets = current.get("tickets", [])
     existing_logs = current.get("learningLogs", [])
 
-    # 1. Fusionar Tickets (antiguos + nuevos, respetando siempre los ya verificados)
+    # 1. Fusionar Tickets y detectar cuáles son nuevos o cambiaron
     ticket_map = {}
+    existing_tk_serialized = {}
     for tk in existing_tickets:
         if isinstance(tk, dict) and tk.get("id"):
-            ticket_map[str(tk["id"])] = tk
+            tk_id = str(tk["id"])
+            ticket_map[tk_id] = tk
+            existing_tk_serialized[tk_id] = json.dumps(tk, sort_keys=True, ensure_ascii=False)
 
+    tickets_to_upsert = []
     for tk in (tickets or []):
         if isinstance(tk, dict) and tk.get("id"):
             tk_id = str(tk["id"])
             if tk_id in ticket_map:
-                ticket_map[tk_id] = merge_single_ticket(ticket_map[tk_id], tk)
+                merged_tk = merge_single_ticket(ticket_map[tk_id], tk)
             else:
-                ticket_map[tk_id] = tk
+                merged_tk = tk
+            ticket_map[tk_id] = merged_tk
+
+            new_serialized = json.dumps(merged_tk, sort_keys=True, ensure_ascii=False)
+            if existing_tk_serialized.get(tk_id) != new_serialized:
+                tickets_to_upsert.append({"id": tk_id, "payload": merged_tk})
 
     merged_tickets = list(ticket_map.values())
-    # Ordenar del más reciente al más antiguo manteniendo el flujo
     merged_tickets.sort(key=lambda x: str(x.get("createdAt") or x.get("date") or x.get("id") or ""), reverse=True)
 
-    # 2. Fusionar Reglas de Aprendizaje (las 2,199 base + todas las nuevas anexadas)
+    # 2. Fusionar Reglas y detectar cuáles son nuevas o cambiaron
     log_map = {}
+    existing_lg_serialized = {}
     for lg in existing_logs:
         if isinstance(lg, dict):
-            log_map[get_rule_unique_key(lg)] = lg
+            rk = get_rule_unique_key(lg)
+            if not lg.get("id"):
+                lg["id"] = rk
+            log_map[rk] = lg
+            existing_lg_serialized[rk] = json.dumps(lg, sort_keys=True, ensure_ascii=False)
 
+    rules_to_upsert = []
     for lg in (learning_logs or []):
         if isinstance(lg, dict):
-            log_map[get_rule_unique_key(lg)] = lg
+            rk = get_rule_unique_key(lg)
+            if not lg.get("id"):
+                lg["id"] = rk
+            log_map[rk] = lg
+
+            new_lg_serialized = json.dumps(lg, sort_keys=True, ensure_ascii=False)
+            if existing_lg_serialized.get(rk) != new_lg_serialized:
+                rules_to_upsert.append({"id": rk, "payload": lg})
 
     merged_logs = list(log_map.values())
 
-    vault_payload = {
+    # 3. Guardar en Supabase únicamente las diferencias (evita bloqueos y uso excesivo de RAM)
+    try:
+        for item in tickets_to_upsert:
+            supabase.table("draftea_tickets").upsert(item).execute()
+        for item in rules_to_upsert:
+            supabase.table("draftea_rules").upsert(item).execute()
+        if tickets_to_upsert or rules_to_upsert:
+            print(f"[SUPABASE SYNC] Subidos {len(tickets_to_upsert)} tickets modificados y {len(rules_to_upsert)} reglas nuevas.")
+    except Exception as e:
+        print(f"[ERROR SUPABASE WRITE] {e}")
+
+    return {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "totalTickets": len(merged_tickets),
         "totalLearningRules": len(merged_logs),
         "tickets": merged_tickets,
         "learningLogs": merged_logs
     }
-
-    with open(VAULT_FILE, "w", encoding="utf-8") as f:
-        json.dump(vault_payload, f, ensure_ascii=False, indent=2)
-
-    return vault_payload
-
-# Crear/verificar el archivo físico apenas arranque el backend
-read_physical_vault()
 
 
 @app.get("/api/history")
@@ -2968,7 +2890,7 @@ async def sync_history(payload: dict):
     incoming_logs = payload.get("learningLogs", [])
     saved_vault = write_physical_vault(incoming_tickets, incoming_logs)
     print(
-        f"[AUTO-SAVE FÍSICO] {len(saved_vault['tickets'])} tickets y {len(saved_vault['learningLogs'])} reglas en {VAULT_FILE}"
+        f"[SUPABASE ACTIVE] Total en nube: {len(saved_vault['tickets'])} tickets y {len(saved_vault['learningLogs'])} reglas."
     )
     return {
         "ok": True,
